@@ -23,7 +23,9 @@ import csv
 import os
 import random
 import re
+import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, asdict, fields
 from urllib.parse import quote_plus
@@ -80,6 +82,33 @@ def looks_blocked(page_source):
 # --------------------------------------------------------------------------- #
 # Driver factory
 # --------------------------------------------------------------------------- #
+def _resolve_chromium():
+    """
+    Locate a launchable Chromium/Chrome binary. The Alpine `chromium` apk
+    package installs the real binary as /usr/bin/chromium-browser (not
+    /usr/bin/chromium), so trusting one env path is fragile. We try every
+    plausible location plus a PATH lookup, and return the first that exists
+    and is executable.
+    """
+    candidates = []
+    for env in ("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "CHROMIUM_PATH"):
+        if os.environ.get(env):
+            candidates.append(os.environ[env])
+    candidates += [
+        "/usr/bin/chromium-browser",   # Alpine apk 'chromium'
+        "/usr/bin/chromium",           # Debian-style symlink / common path
+        "/opt/chromium/chrome",
+        "/opt/google/chrome/chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ]
+    for c in candidates:
+        if c and os.path.exists(c) and os.access(c, os.X_OK):
+            return c
+    return shutil.which("chromium-browser") or shutil.which("chromium") \
+        or shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+
+
 def make_driver(headless=True):
     opts = Options()
     if headless:
@@ -98,16 +127,30 @@ def make_driver(headless=True):
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
 
-    chromium_path = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or \
-                    os.environ.get("CHROMIUM_PATH")
+    chromium_path = _resolve_chromium()
     if chromium_path:
         opts.binary_location = chromium_path
+        print(f"  chromium: {chromium_path}", file=sys.stderr)
+    else:
+        # Fail loudly with an actionable message instead of the cryptic
+        # "DevToolsActivePort file doesn't exist" that Selenium throws when the
+        # binary it was told to launch isn't there.
+        raise RuntimeError(
+            "Could not find a Chromium/Chrome executable. Checked env vars "
+            "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH/CHROMIUM_PATH and the usual "
+            "system paths (chromium-browser, chromium, google-chrome). Is "
+            "chromium installed in this container?"
+        )
 
     chromedriver = os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
     if os.path.exists(chromedriver):
         service = Service(executable_path=chromedriver)
     else:
         service = Service()
+
+    # Fresh temp profile so a stale lock in a shared location can't prevent
+    # Chromium from opening its DevTools port.
+    opts.add_argument(f"--user-data-dir={tempfile.mkdtemp(prefix='chromeprofile-')}")
 
     driver = webdriver.Chrome(service=service, options=opts)
     driver.execute_script(
