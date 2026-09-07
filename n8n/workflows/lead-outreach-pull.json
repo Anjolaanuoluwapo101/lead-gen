@@ -1,0 +1,95 @@
+{
+  "name": "Lead Outreach: Pull > Review > Mark (no send)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a100-outreach-manual",
+      "name": "Run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [140, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a110-campaignid",
+              "name": "campaign_id",
+              "value": "75a92521-5ef2-40a1-8bcc-62fde5291842",
+              "type": "string"
+            },
+            {
+              "id": "a111-scope",
+              "name": "scope",
+              "value": "unprocessed",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "a120-pull-params",
+      "name": "Campaign (pending leads)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [340, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/leads",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ campaign_id: $json.campaign_id, scope: $json.scope }) }}",
+        "options": {}
+      },
+      "id": "a130-pull-http",
+      "name": "Pull /leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [540, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = $json;\nconst leads = (out.leads || []).map(l => ({\n  lead_id: l.id,\n  prospect_id: l.prospect_id,\n  business: l.business_name,\n  category: l.category,\n  phone: l.phone,\n  email: (Array.isArray(l.emails) ? l.emails : []).join(', '),\n  website: l.website,\n  score: l.opportunity_score,\n  qualified: l.qualified,\n  why: l.weakness,\n  first_line: l.first_line,\n  created_at: l.created_at\n}));\n// Review the returned items here. Each row is one pending lead.\nreturn leads;"
+      },
+      "id": "a140-expand",
+      "name": "Expand to review rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/leads/status",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ lead_ids: [$json.lead_id], status: 'contacted' }) }}",
+        "options": {}
+      },
+      "id": "a150-mark",
+      "name": "Mark contacted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [940, 300]
+    }
+  ],
+  "connections": {
+    "Run": {
+      "main": [[{ "node": "Campaign (pending leads)", "type": "main", "index": 0 }]]
+    },
+    "Campaign (pending leads)": {
+      "main": [[{ "node": "Pull /leads", "type": "main", "index": 0 }]]
+    },
+    "Pull /leads": {
+      "main": [[{ "node": "Expand to review rows", "type": "main", "index": 0 }]]
+    },
+    "Expand to review rows": {
+      "main": [[{ "node": "Mark contacted", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

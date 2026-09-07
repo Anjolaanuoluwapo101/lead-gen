@@ -1,0 +1,197 @@
+{
+  "name": "Lead Campaign: Find > Enrich > Score > Store",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "9f6b0a2f-manual-trigger",
+      "name": "When clicked 'Test workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "inp-keyword",
+              "name": "keyword",
+              "value": "dentist",
+              "type": "string"
+            },
+            {
+              "id": "inp-place",
+              "name": "place",
+              "value": "Austin, TX",
+              "type": "string"
+            },
+            {
+              "id": "inp-niche",
+              "name": "niche",
+              "value": "adds online booking to dental clinics",
+              "type": "string"
+            },
+            {
+              "id": "inp-maxresults",
+              "name": "max_results",
+              "value": "6",
+              "type": "number"
+            },
+            {
+              "id": "inp-locationname",
+              "name": "location_name",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "inp-campaignid",
+              "name": "campaign_id",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "inp-campaignname",
+              "name": "campaign_name",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "inp-locationcode",
+              "name": "location_code",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "inp-enrichcount",
+              "name": "enrich_max_count",
+              "value": "12",
+              "type": "number"
+            },
+            {
+              "id": "inp-enrichdepth",
+              "name": "enrich_max_depth",
+              "value": "1",
+              "type": "number"
+            },
+            {
+              "id": "inp-enrichanalyze",
+              "name": "enrich_analyze_pages_limit",
+              "value": "3",
+              "type": "number"
+            },
+            {
+              "id": "inp-alldomains",
+              "name": "all_domains",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "inp-scoremodel",
+              "name": "score_model",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "inp-scoreextrahints",
+              "name": "score_extra_hints",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "inp-scrutiny",
+              "name": "scrutiny",
+              "value": "strict",
+              "type": "string"
+            },
+            {
+              "id": "inp-socialplatforms",
+              "name": "social_platforms",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "a41c1b10-params",
+      "name": "Campaign Inputs",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/campaign",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "e37c2210-http",
+      "name": "Run /campaign",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = $json;\nconst leads = (out.leads || []).map(l => ({\n  business: l.business_name,\n  phone: l.phone,\n  email: (l.emails || []).join(', '),\n  website: l.website,\n  score: l.score,\n  qualified: l.qualified,\n  why: l.weakness,\n  first_line: l.first_line\n}));\nreturn [{\n  summary: {\n    ok: out.ok,\n    keyword: out.keyword,\n    place: out.place,\n    niche: out.niche,\n    found: out.found,\n    enriched: out.enriched,\n    scored: out.scored,\n    qualified: out.qualified,\n    stored: out.stored,\n    campaign_id: out.campaign_id\n  },\n  leads\n}];"
+      },
+      "id": "b01d3c11-summary",
+      "name": "Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "When clicked 'Test workflow'": {
+      "main": [
+        [
+          {
+            "node": "Campaign Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Campaign Inputs": {
+      "main": [
+        [
+          {
+            "node": "Run /campaign",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run /campaign": {
+      "main": [
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

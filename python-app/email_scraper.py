@@ -41,6 +41,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
+import headless_fetch  # optional JS-render fallback for hollow/SPA pages
+
 try:
     from curl_cffi import requests as cffi_requests
     HAS_CURL_CFFI = True
@@ -440,7 +442,6 @@ def analyze_page(html_text, url):
     jsonld = extract_jsonld(soup)
     headings = extract_headings(soup)
     nav_links = extract_nav_links(soup)
-    social_links = extract_social_links(soup)
     phones = extract_phones(html_text)
     cms = detect_cms(html_text)
 
@@ -458,32 +459,33 @@ def analyze_page(html_text, url):
         "jsonld": jsonld,
         "headings": headings,
         "nav_links": nav_links,
-        "social_links": social_links,
         "phones_found": phones,
         "cms_platform": cms,
         "body_text_sample": body_text,
     }
 
 
-def merge_intelligence(page_analyses):
+def merge_intelligence(page_analyses, site_socials=None):
     """
     Combine per-page analyze_page() results into one site-level summary.
     Prefers the homepage's title/meta/jsonld (most authoritative), but unions
-    nav links, socials, phones, and CMS detection across every page crawled.
+    nav links, phones, and CMS detection across every page crawled.
+
+    site_socials: social links already accumulated across EVERY fetched page
+    (see scrape_website), not just the analyzed ones — so max_count actually
+    widens social coverage just like email coverage.
     """
     if not page_analyses:
         return {}
 
     primary = page_analyses[0]
-    all_nav, all_social, all_phones, all_jsonld = [], {}, [], []
+    all_nav, all_social, all_phones, all_jsonld = [], dict(site_socials or {}), [], []
     cms = None
 
     for p in page_analyses:
         for link in p["nav_links"]:
             if link not in all_nav:
                 all_nav.append(link)
-        for label, href in p["social_links"].items():
-            all_social.setdefault(label, href)
         for ph in p["phones_found"]:
             if ph not in all_phones:
                 all_phones.append(ph)
@@ -530,6 +532,7 @@ def scrape_website(start_url, max_count=50, max_depth=2, same_domain_only=True,
     urls_to_process = deque([(start_url, 0)])
     scraped_urls = set()
     email_sources = {}
+    site_socials = {}          # social links across EVERY fetched page
     page_analyses = []
     errors = []
     count = 0
@@ -553,8 +556,23 @@ def scrape_website(start_url, max_count=50, max_depth=2, same_domain_only=True,
                 fetcher.polite_sleep()
             continue
 
+        # Headless fallback: if this raw response is an empty JS shell, load the
+        # page for real so email/social/analysis run on the rendered content.
+        # Only fires when enabled (ENRICH_JS_RENDER) and the page looks hollow.
+        if headless_fetch.looks_js_hollow(text) and headless_fetch.enabled():
+            rendered = headless_fetch.render(url)
+            if rendered:
+                text = rendered
+
         for email in extract_emails(text):
             email_sources.setdefault(email, set()).add(url)
+
+        # Socials are as cheap as emails, so extract them on EVERY fetched page
+        # (not throttled to analyze_pages_limit) and union site-wide. Raising
+        # max_count therefore widens social coverage, matching emails.
+        for label, href in extract_social_links(
+                BeautifulSoup(text, 'lxml')).items():
+            site_socials.setdefault(label, href)
 
         if len(page_analyses) < analyze_pages_limit:
             try:
@@ -583,7 +601,7 @@ def scrape_website(start_url, max_count=50, max_depth=2, same_domain_only=True,
 
     return {
         "emails": {email: sorted(sources) for email, sources in email_sources.items()},
-        "intelligence": merge_intelligence(page_analyses),
+        "intelligence": merge_intelligence(page_analyses, site_socials),
         "pages_scraped": count,
         "errors": errors,
     }

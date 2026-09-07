@@ -117,8 +117,9 @@ record, not a qualified lead.
 
 | Existing engine | File | Stage | Notes / gaps |
 |-----------------|------|-------|--------------|
-| Flask HTTP wrapper | `python-app/app.py` | all | `POST /yellowpages`, `/googlemaps`, `/email`. Internal only (127.0.0.1:5000). |
-| Google Maps finder | `python-app/google_maps.py` | FIND | richest dataset; Selenium/Chromium; consent/CAPTCHA sensitive; **US geo needed** |
+| Flask HTTP wrapper | `python-app/app.py` | all | `POST /yellowpages`, `/googlemaps`, `/places`, `/email`. Internal only (127.0.0.1:5000). |
+| Google Maps finder | `python-app/google_maps.py` | FIND | richest dataset; Selenium/Chromium; **LOCAL-DEV ONLY** — headless scraping needs a one-time human consent pass on a residential IP; not hostable as a service |
+| **DataForSEO Maps finder** | `python-app/dataforseo.py` | FIND | **hostable replacement.** Licensed Google Maps data via API. No browser/consent. `POST /places`. ~$0.002/call. See §5b. |
 | YellowPages finder | `python-app/yellow_pages.py` | FIND | US-only traffic; **requires US proxy** from non-US IP |
 | Website intelligence | `python-app/email_scraper.py` | ENRICH | emails + content-intelligence (CMS/socials/nav/jsonld/phones). **Core asset.** |
 | Anti-blocking layer | shared in scrapers | all | curl_cffi TLS impersonation → cloudscraper → requests; proxy rotation; retries. |
@@ -129,6 +130,17 @@ record, not a qualified lead.
 - No scoring rules or LLM enrichment node.
 - No delivery / customer-facing layer.
 - No config-per-customer model (multi-tenant).
+
+### §5b — Hostable FIND (how the product actually ships)
+
+`google_maps.py` (Selenium) is fine for local dev but **cannot be the hosted backbone**: Google shows a consent/CAPTCHA wall to fresh/headless/cloud-IP browsers, and clearing it needs a human + a residential IP that don't exist in a container. So the shipped product uses a **licensed data source for FIND**:
+
+- **`dataforseo.py` + `POST /places`** hits DataForSEO's Google Maps live endpoint (`/v3/serp/google/maps/live/advanced`) with `keyword` + a location name. It returns the **same row shape as `google_maps.py`** (name, phone, website, category, rating, review_count, address, place_id, hours), so the n8n pipeline / downstream code doesn't care which finder ran.
+- Auth is DataForSEO account `login`+`password` via HTTP Basic, read from `.env` (`DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD`); `.env.example` is committed.
+- Cost ~$0.002/call on prepaid credits (no card required to start; PayPal accepted; credits never expire).
+- Why this over scraping Google: **legal, stable, runs in any container** — it de-risks the one commodity step and leaves the moat (enrichment + scoring + delivery) intact.
+
+**Result:** a customer's n8n workflow points at `/places` (hostable) or `/googlemaps` (local dev) — identical downstream behavior.
 
 ---
 
@@ -244,16 +256,19 @@ Notes for when we build it:
    CSV, an emailed report? (Decides the last pipeline stage's shape.)
 3. **Multi-tenant config:** how per-campaign config reaches n8n (Supabase rows →
    webhook → workflow).
-4. **Proxy sourcing:** residential proxies for US geo-targeting (cost driver).
-5. **Legal posture:** how we position and market the product (see §8).
+4. **Finder choice:** `/places` (DataForSEO, hostable) vs `/googlemaps` (local
+   dev only). Product ships on `/places`; cost per lead needs a real-world number.
+5. **Legal posture:** how we position and market the product (see §8). `/places`
+   is licensed; scraped finders are not.
 
 ---
 
 ## 10. Next steps
 
-1. **Prove engines return data** (Google Maps priority) with a US proxy — confirm the
-   foundation works before building product features on top.
+1. **Finder is proven** — `/googlemaps` works locally (with a one-time consent
+   pass); `/places` works headlessly/hostably via DataForSEO. ✅ (2026-09)
 2. **Stand up Supabase** schema (§6) — the contracts everything else writes to.
-3. **Build one end-to-end n8n workflow** (maps → enrich → score → store → export) for a
-   single demo niche, e.g. *dentists with no online booking in Austin, TX*.
+3. **Build one end-to-end n8n workflow** (places → enrich → score → store →
+   export) for a single demo niche, e.g. *dentists with no online booking in
+   Austin, TX*. Workflow calls `/places` for FIND.
 4. Pick the delivery surface + first customer/pilot for the demo niche.

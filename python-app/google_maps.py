@@ -25,7 +25,6 @@ import random
 import re
 import shutil
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, asdict, fields
 from urllib.parse import quote_plus
@@ -41,6 +40,14 @@ try:
 except ImportError:
     print("Missing dependency. Run:\n  pip install selenium\n  apk add chromium chromium-chromedriver")
     sys.exit(1)
+
+# Windows consoles default to cp1252, which crashes on '✓'/'—'. Force UTF-8 so
+# any log line is safe to print regardless of the terminal's codepage.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -101,12 +108,27 @@ def _resolve_chromium():
         "/opt/google/chrome/chrome",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
+        # Windows: normal Google Chrome / Edge installs.
+        "C:/Program Files/Google/Chrome/Application/chrome.exe",
+        "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+        os.path.expandvars("%LOCALAPPDATA%/Google/Chrome/Application/chrome.exe"),
+        "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+        "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
     ]
     for c in candidates:
         if c and os.path.exists(c) and os.access(c, os.X_OK):
             return c
-    return shutil.which("chromium-browser") or shutil.which("chromium") \
-        or shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+    return (shutil.which("chromium-browser") or shutil.which("chromium")
+            or shutil.which("chrome") or shutil.which("msedge")
+            or shutil.which("google-chrome") or shutil.which("google-chrome-stable"))
+
+
+# Persistent Chrome profile. Google asks for consent on the first visit from a
+# fresh profile; a one-time --headed run can accept it and we reuse that choice
+# on later headless runs. A throwaway temp profile would re-trigger the wall
+# every run, so this must be stable across invocations.
+PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           ".browser-profile")
 
 
 def make_driver(headless=True):
@@ -131,8 +153,9 @@ def make_driver(headless=True):
     if chromium_path:
         opts.binary_location = chromium_path
         print(f"  chromium: {chromium_path}", file=sys.stderr)
-    else:
-        # Fail loudly with an actionable message instead of the cryptic
+    elif os.name != "nt":
+        # On Linux/containers we expect an explicit apk/system Chromium. Fail
+        # loudly with an actionable message instead of the cryptic
         # "DevToolsActivePort file doesn't exist" that Selenium throws when the
         # binary it was told to launch isn't there.
         raise RuntimeError(
@@ -141,6 +164,11 @@ def make_driver(headless=True):
             "system paths (chromium-browser, chromium, google-chrome). Is "
             "chromium installed in this container?"
         )
+    else:
+        # Windows: no explicit path, but Selenium Manager can auto-locate a
+        # normal Chrome/Edge install (and auto-fetch a matching chromedriver).
+        print("  chromium: no explicit path; letting Selenium auto-detect Chrome",
+              file=sys.stderr)
 
     chromedriver = os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
     if os.path.exists(chromedriver):
@@ -148,9 +176,8 @@ def make_driver(headless=True):
     else:
         service = Service()
 
-    # Fresh temp profile so a stale lock in a shared location can't prevent
-    # Chromium from opening its DevTools port.
-    opts.add_argument(f"--user-data-dir={tempfile.mkdtemp(prefix='chromeprofile-')}")
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    opts.add_argument(f"--user-data-dir={PROFILE_DIR}")
 
     driver = webdriver.Chrome(service=service, options=opts)
     driver.execute_script(
@@ -300,7 +327,7 @@ class MapsScraper:
                     if item_id.startswith("address"):
                         street, locality, region, zipcode = self._split_address(text)
                     elif item_id.startswith("phone"):
-                        telephone = text
+                        telephone = self._clean_phone(text)
                     elif item_id.startswith("authority") or "website" in item_id:
                         website = btn.get_attribute("href") or text
                     elif "oloc" in item_id or "plus" in item_id:
@@ -334,6 +361,17 @@ class MapsScraper:
             listing_url=listing_url,
         )
 
+    @staticmethod
+    def _clean_phone(text):
+        """
+        Google sometimes prefixes a stored phone number with a private-use
+        char + newline as light obfuscation ('\n+1 512-...'). Keep only
+        phone-meaningful characters so the value is clean for outreach.
+        """
+        allowed = "+0123456789 -()."
+        cleaned = "".join(ch for ch in (text or "") if ch in allowed)
+        return " ".join(cleaned.split()).strip()
+
     def _split_address(self, text):
         text = text.strip()
         m = re.search(r"(.*?),?\s*([A-Za-z .]+),\s*([A-Z]{2})\s*(\d{5})?$", text)
@@ -346,6 +384,22 @@ class MapsScraper:
             )
         return text, "", "", ""
 
+    def _await_consent(self, driver, listing_url, timeout=120):
+        """
+        Headed mode: give the human a chance to clear Google's consent/CAPTCHA
+        in the visible window. Polls until the page is no longer blocked or the
+        timeout elapses. This is what makes the one-time consent pass work —
+        without it the scraper bails ~2s after opening, before anyone can click.
+        """
+        deadline = time.time() + timeout
+        self.log("  Headed run: a Google consent/CAPTCHA prompt may be showing. "
+                 "Click 'Accept all' (or solve it) in the browser window...")
+        while time.time() < deadline:
+            if not looks_blocked(driver.page_source):
+                return True
+            time.sleep(2)
+        return False
+
     def scrape(self, keyword, place, max_results=40, offset=0):
         listing_url = self.build_url(keyword, place)
         results = []
@@ -357,8 +411,15 @@ class MapsScraper:
             self._pause(1.5, 2.5)
 
             if looks_blocked(driver.page_source):
-                self.log("  consent/CAPTCHA wall detected. Try --headed on first run.")
-                return results
+                if self.headless:
+                    self.log("  consent/CAPTCHA wall detected. Accept it once "
+                             "with --headed; the choice is stored in the "
+                             f"persistent profile at {PROFILE_DIR}.")
+                    return results
+                if not self._await_consent(driver, listing_url):
+                    self.log("  Consent/CAPTCHA not resolved in time. Exiting.")
+                    return results
+                self.log("  consent cleared — continuing.")
 
             hrefs = self._scroll_and_collect(driver, max_results, offset=offset)
             self.log(f"Collected {len(hrefs)} listing links. Visiting each for details...")
@@ -427,7 +488,7 @@ def main():
         .replace(" ", "_").replace(",", "")
     )
     write_csv(rows, out)
-    print(f"\n✓ Wrote {len(rows)} listings to {out}")
+    print(f"\nWrote {len(rows)} listings to {out}")
 
 
 if __name__ == "__main__":

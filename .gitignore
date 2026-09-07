@@ -1,2 +1,14 @@
 venv/
 venv
+docs
+docs/
+
+# Local dev artifacts (not part of the product)
+node_modules/
+n8n/node_modules/
+drivers/
+python-app/.browser-profile/
+python-app/outputs/
+python-app/__pycache__/
+python-app/.env
+*.csv

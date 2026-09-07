@@ -1,0 +1,70 @@
+[attempt 1/3] GET https://www.swishsmiles.com
+  OK (159,982 bytes)
+  sleeping 2.5s
+[attempt 1/3] GET https://www.swishsmiles.com/services/preventative-dentistry
+  OK (96,194 bytes)
+  sleeping 2.0s
+[attempt 1/3] GET https://www.swishsmiles.com/services/restorative-dentistry
+  OK (96,297 bytes)
+  sleeping 1.6s
+[attempt 1/3] GET https://www.swishsmiles.com/services/dental-emergencies
+  OK (93,714 bytes)
+  sleeping 3.1s
+[attempt 1/3] GET https://www.swishsmiles.com/services/dental-crowns
+  OK (104,217 bytes)
+  sleeping 3.1s
+[attempt 1/3] GET https://www.swishsmiles.com/services/teeth-whitening
+  OK (95,147 bytes)
+  sleeping 1.8s
+[attempt 1/3] GET https://www.swishsmiles.com/services/cosmetic-dentistry
+  OK (93,772 bytes)
+  sleeping 2.1s
+[attempt 1/3] GET https://www.swishsmiles.com/services/dental-implants
+  OK (97,972 bytes)
+  sleeping 3.0s
+[attempt 1/3] GET https://www.swishsmiles.com/services/swish-services-invisalign
+  OK (92,424 bytes)
+  sleeping 1.6s
+[attempt 1/3] GET https://www.swishsmiles.com/services/veneers
+  OK (96,464 bytes)
+  sleeping 1.8s
+[attempt 1/3] GET https://www.swishsmiles.com/services/full-mouth-reconstruction
+  OK (95,350 bytes)
+  sleeping 3.1s
+[attempt 1/3] GET https://www.swishsmiles.com/services/specialty-oral-surgery
+  OK (94,671 bytes)
+[attempt 1/3] GET https://austincosmetic.com/?utm_source=google&utm_medium=organic&utm_campaign=gbp-listing
+  OK (66,760 bytes)
+  sleeping 1.5s
+[attempt 1/3] GET https://austincosmetic.com/
+  OK (66,760 bytes)
+  sleeping 2.4s
+[attempt 1/3] GET https://austincosmetic.com/home/
+  OK (66,760 bytes)
+  sleeping 2.7s
+[attempt 1/3] GET https://austincosmetic.com/veneers/
+  OK (83,255 bytes)
+  sleeping 3.4s
+[attempt 1/3] GET https://austincosmetic.com/veneer-frequent-asked-questions/
+  OK (94,221 bytes)
+  sleeping 2.8s
+[attempt 1/3] GET https://austincosmetic.com/minimal-prep-no-prep-veneers/
+  OK (64,497 bytes)
+  sleeping 3.5s
+[attempt 1/3] GET https://austincosmetic.com/cosmetic-dentistry/
+  OK (57,217 bytes)
+  sleeping 2.7s
+[attempt 1/3] GET https://austincosmetic.com/cost-of-veneers/
+  OK (62,519 bytes)
+  sleeping 2.4s
+[attempt 1/3] GET https://austincosmetic.com/traveling-patients/
+  OK (56,432 bytes)
+  sleeping 2.5s
+[attempt 1/3] GET https://austincosmetic.com/about/
+  OK (58,180 bytes)
+  sleeping 2.6s
+[attempt 1/3] GET https://austincosmetic.com/blog/
+  OK (63,041 bytes)
+  sleeping 2.7s
+[attempt 1/3] GET https://austincosmetic.com/smile-makeover/
+  OK (73,165 bytes)
