@@ -119,15 +119,23 @@ def _gte_filters(filters):
     return {col: f"gte.{val}" for col, val in (filters or {}).items()}
 
 
-def select_rows(table, columns="*", filters=None, filters_gte=None, limit=None,
-                order=None):
+def _in_filters(filters):
+    """Turn {col: [values]} into PostgREST `in` params (col=in.(a,b,c)). Used to
+    scope reads to a set of ids (e.g. a seller's campaign/lead ownership check)."""
+    return {col: f"in.({','.join(str(v) for v in values)})"
+            for col, values in (filters or {}).items() if values}
+
+
+def select_rows(table, columns="*", filters=None, filters_gte=None,
+                filters_in=None, limit=None, order=None):
     """SELECT rows via PostgREST. Returns a list of dicts.
 
     columns: PostgREST `select` projection (e.g. "id,business_name" or a nested
              embed like "id,campaigns(name)"). filters: {col: value} equality
              matches (eq). filters_gte: {col: value} greater-or-equal matches
-             (gte) -- e.g. {"created_at": since} for incremental pulls. limit:
-             optional int cap. order: optional PostgREST order spec, e.g.
+             (gte) -- e.g. {"created_at": since} for incremental pulls.
+             filters_in: {col: [values]} `in` matches (col=in.(a,b,c)).
+             limit: optional int cap. order: optional PostgREST order spec, e.g.
              "created_at.asc" for stable cursor advancement.
     """
     if not configured():
@@ -137,6 +145,7 @@ def select_rows(table, columns="*", filters=None, filters_gte=None, limit=None,
     params = {"select": columns}
     params.update(_eq_filters(filters))
     params.update(_gte_filters(filters_gte))
+    params.update(_in_filters(filters_in))
     if order:
         params["order"] = order
     if limit:
@@ -195,6 +204,28 @@ def upsert_rows(table, rows, on_conflict=None):
     )
     if resp.status_code >= 300:
         _raise(table, "upsert", resp)
+    try:
+        return resp.json()
+    except ValueError:
+        return []
+
+
+def rpc(name, payload=None):
+    """Call a Postgres function exposed by PostgREST (POST /rpc/<name>). Lets the
+    engine run server-side aggregation (e.g. campaign_summary) instead of pulling
+    rows to tally in Python. `payload` is the named-argument JSON body."""
+    if not configured():
+        raise RuntimeError(
+            "Supabase not configured. Add SUPABASE_URL and SUPABASE_SERVICE_KEY "
+            "to .env (see .env.example).")
+    resp = requests.post(
+        f"{URL}/rest/v1/rpc/{name}",
+        headers=_headers(),
+        json=payload or {},
+        timeout=30,
+    )
+    if resp.status_code >= 300:
+        _raise(name, "rpc", resp)
     try:
         return resp.json()
     except ValueError:

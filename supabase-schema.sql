@@ -107,3 +107,158 @@ create index if not exists idx_leads_opportunity on public.leads(campaign_id, op
 select 'campaigns' as t, count(*) from public.campaigns
 union all select 'prospects', count(*) from public.prospects
 union all select 'leads', count(*) from public.leads;
+
+-- =====================================================================
+-- Campaign summary -- efficient server-side aggregation.
+-- Backs POST /campaigns/summary so the engine never pulls the whole leads
+-- table just to tally counts. Run this block in the Supabase SQL editor.
+-- =====================================================================
+create or replace function public.campaign_summary(p_campaign_id uuid default null)
+returns table (
+  campaign_id      uuid,
+  name             text,
+  keyword          text,
+  location         text,
+  niche            text,
+  created_at       timestamptz,
+  total_leads      bigint,
+  qualified        bigint,
+  ready            bigint,
+  status_new       bigint,
+  status_contacted bigint,
+  status_replied   bigint,
+  status_won       bigint,
+  status_lost      bigint
+)
+language sql
+stable
+as $$
+  select
+    c.id,
+    c.name,
+    c.keyword,
+    c.location,
+    c.niche_rules ->> 'niche',
+    c.created_at,
+    count(l.id),
+    count(l.id) filter (where l.qualified),
+    count(l.id) filter (where l.status = 'new'),
+    count(l.id) filter (where l.status = 'new'),
+    count(l.id) filter (where l.status = 'contacted'),
+    count(l.id) filter (where l.status = 'replied'),
+    count(l.id) filter (where l.status = 'won'),
+    count(l.id) filter (where l.status = 'lost')
+  from public.campaigns c
+  left join public.leads l on l.campaign_id = c.id
+  where p_campaign_id is null or c.id = p_campaign_id
+  group by c.id
+  order by c.created_at desc;
+$$;
+
+grant execute on function public.campaign_summary(uuid) to anon, authenticated, service_role;
+
+-- =====================================================================
+-- Phase 4 -- multi-tenant sellers (see docs/multi-tenant-plan.md).
+-- One row per seller. Campaigns belong to a seller via campaigns.seller_id;
+-- leads/prospects inherit the seller through their campaign (no column needed
+-- on them). Run this whole block in the Supabase SQL editor.
+-- =====================================================================
+
+create table if not exists public.seller_profile (
+  id           uuid primary key default gen_random_uuid(),
+  email        text not null,                 -- natural key -> find-or-create from n8n form
+  name         text,                          -- person's display name (used in draft signature)
+  title        text,                          -- e.g. 'Founder', 'Sales Director'
+  brand        text,                          -- business/sender brand the emails go out as
+  phone        text,
+  -- Resume (uploaded by the seller). We store the EXTRACTED text, not the file.
+  resume_text     text,
+  resume_filename text,
+  -- Portfolio website. We store the scraped/extracted output.
+  portfolio_url   text,
+  portfolio_text  text,
+  -- Tri-state render toggle: html (static only) | js (always JS-render) | auto (detect).
+  -- Defaults to 'auto'; set explicitly at seller creation from the web form.
+  render_mode   text not null default 'auto'
+                check (render_mode in ('html','js','auto')),
+  -- Per-seller provider creds + behaviour overrides that today live in env
+  -- (see env tiers in the plan doc). Empty object = fall back to env defaults.
+  -- e.g. {"groq": {...}, "dataforseo": {...}, "scrutiny": {...}, "confidence_floor": ...}
+  settings      jsonb not null default '{}',
+  active        boolean not null default true,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  constraint seller_profile_email_key unique (email)
+);
+
+-- Give every existing + new campaign an owning seller (nullable now so old
+-- rows keep working; the engine falls back to DEFAULT_SELLER_ID when null).
+alter table public.campaigns
+  add column if not exists seller_id uuid references public.seller_profile(id);
+
+create index if not exists idx_campaigns_seller on public.campaigns(seller_id);
+create index if not exists idx_seller_profile_email on public.seller_profile(email);
+
+-- =====================================================================
+-- Seller read-scoping: campaign_summary now also scopes to ONE seller.
+-- Adds a second (uuid) overload; keep the single-arg one above for any
+-- existing callers. Backs POST /campaigns/summary {seller_id, campaign_id?}.
+-- Run this block in the Supabase SQL editor.
+-- =====================================================================
+create or replace function public.campaign_summary(
+  p_campaign_id uuid default null,
+  p_seller_id   uuid default null
+)
+returns table (
+  campaign_id      uuid,
+  name             text,
+  keyword          text,
+  location         text,
+  niche            text,
+  created_at       timestamptz,
+  total_leads      bigint,
+  qualified        bigint,
+  ready            bigint,
+  status_new       bigint,
+  status_contacted bigint,
+  status_replied   bigint,
+  status_won       bigint,
+  status_lost      bigint
+)
+language sql
+stable
+as $$
+  select
+    c.id,
+    c.name,
+    c.keyword,
+    c.location,
+    c.niche_rules ->> 'niche',
+    c.created_at,
+    count(l.id),
+    count(l.id) filter (where l.qualified),
+    count(l.id) filter (where l.status = 'new'),
+    count(l.id) filter (where l.status = 'new'),
+    count(l.id) filter (where l.status = 'contacted'),
+    count(l.id) filter (where l.status = 'replied'),
+    count(l.id) filter (where l.status = 'won'),
+    count(l.id) filter (where l.status = 'lost')
+  from public.campaigns c
+  left join public.leads l on l.campaign_id = c.id
+  where (p_campaign_id is null or c.id = p_campaign_id)
+    and (p_seller_id is null or c.seller_id = p_seller_id)
+  group by c.id
+  order by c.created_at desc;
+$$;
+
+grant execute on function public.campaign_summary(uuid, uuid) to anon, authenticated, service_role;
+
+-- ---------------------------------------------------------------------
+-- Optional, recommended backfill: claim legacy campaigns that were created
+-- before seller_id existed (their owner column is NULL) for the DEFAULT
+-- single-tenant seller, so the seller-scoped reads below still surface them.
+-- Set <DEFAULT_SELLER_ID> to the value in your .env, then run.
+-- ---------------------------------------------------------------------
+-- update public.campaigns
+--    set seller_id = '<DEFAULT_SELLER_ID>'
+--  where seller_id is null;

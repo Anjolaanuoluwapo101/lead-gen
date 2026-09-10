@@ -35,13 +35,14 @@ import json
 import os
 import sys
 
-import dataforseo
+import config
 import email_scraper
-import groq_ai
 import identity
+import llm
 import scoring
 import social_enrich
 import supabase_store
+from providers import get_llm, get_source
 
 # --------------------------------------------------------------------------- #
 # .env loader (imports above already load it, but be explicit for CLI runs)
@@ -75,6 +76,12 @@ DEFAULTS = {
     "niche": "adds online booking to dental clinics",
     "max_results": 6,
 }
+
+# Which seller owns a campaign when the caller sends no explicit seller_id.
+# A single-user bridge for existing n8n workflows (see docs/multi-tenant-plan.md);
+# once every workflow passes a real seller this becomes dead fallback config.
+# Set DEFAULT_SELLER_ID in .env to one of your seller_profile rows' uuids.
+DEFAULT_SELLER_ID = (os.environ.get("DEFAULT_SELLER_ID") or "").strip() or None
 
 # Enrichment crawl caps — keep a demo run bounded (homepage + a few links).
 ENRICH_MAX_COUNT = 12
@@ -253,7 +260,7 @@ def _int_or_none(v):
 
 def run_campaign(keyword=None, place=None, niche=None, max_results=None,
                  location_name=None, location_code=None,
-                 campaign_id=None, campaign_name=None,
+                 campaign_id=None, campaign_name=None, seller_id=None,
                  enrich_max_count=None, enrich_max_depth=None,
                  enrich_analyze_pages_limit=None, all_domains=False,
                  score_model=None, score_extra_hints=None,
@@ -267,6 +274,12 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
     Every field is optional — DEFAULTS supplies keyword/place/niche/max_results
     and enrich/score knobs fall back to their module constants, so n8n can send
     a partial payload and the engine fills the gaps.
+
+    seller_id: who owns this campaign (a seller_profile uuid). Falls back to
+    DEFAULT_SELLER_ID (.env), then to None. It scopes campaign find-or-create:
+    two sellers running the same niche/place get SEPARATE campaigns, so dedup +
+    history never leak across tenants. Null is allowed and simply leaves the
+    campaign unowned (legacy behaviour) until a seller is resolved.
     """
     keyword = (keyword or DEFAULTS["keyword"]).strip()
     place = (place or DEFAULTS["place"]).strip()
@@ -275,6 +288,51 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         max_results = int(max_results)
     except (TypeError, ValueError):
         max_results = DEFAULTS["max_results"]
+
+    resolved_seller_id = (seller_id or DEFAULT_SELLER_ID or "").strip() or None
+
+    # Resolve this seller's provider config (per-seller settings with env-master
+    # fallback) and build the adapters ONCE for the run. A missing/undecryptable
+    # key simply falls back to the master env key; if even that is absent the
+    # adapter build raises and we degrade to a source-only / find-only run.
+    seller_settings = None
+    setup_errors = []
+    if supabase_store.configured() and resolved_seller_id:
+        try:
+            _rows = supabase_store.select_rows(
+                "seller_profile", columns="settings", filters={"id": resolved_seller_id},
+                limit=1)
+            if _rows:
+                raw = _rows[0].get("settings")
+                if isinstance(raw, str):
+                    try:
+                        seller_settings = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        seller_settings = None
+                else:
+                    seller_settings = raw
+        except Exception as e:
+            setup_errors.append(f"seller config lookup failed: {e}")
+
+    source = None
+    try:
+        source = get_source(config.source_cfg(seller_settings))
+    except Exception as e:
+        setup_errors.append(f"source not configured: {e}")
+
+    # LLM provider (used for scoring; draft is a separate /draft call). Built
+    # once and reused across all businesses in this run. Score uses the seller's
+    # provider/model unless the caller overrides with score_model.
+    llm_provider = None
+    llm_cfg = config.llm_cfg(seller_settings, model=score_model)
+    if llm_cfg.get("api_key"):
+        try:
+            llm_provider = get_llm(llm_cfg)
+        except Exception as e:
+            setup_errors.append(f"llm not configured: {e}")
+    else:
+        setup_errors.append("no LLM provider configured — scoring/qualification "
+                            "will be skipped (find/enrich still run)")
 
     cfg = scrutiny_config(scrutiny)
     soc_platforms = social_enrich.parse_platforms(social_platforms)
@@ -289,6 +347,7 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         "scrutiny": cfg["tier"],
         "score_threshold": cfg["threshold"],
         "campaign_id": campaign_id,
+        "seller_id": resolved_seller_id,
         "campaign_reused": False,
         "duplicates": 0,
         "found": 0,
@@ -300,12 +359,17 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         "leads": [],
         "errors": [],
     }
+    results["errors"].extend(setup_errors)
 
     # ---------------- FIND ---------------- #
-    rows, _ = dataforseo.scrape_maps(keyword, place,
-                                     location_name=location_name,
-                                     location_code=location_code,
-                                     max_results=max_results)
+    if source is None:
+        results["errors"].append(
+            "FIND skipped: no business source configured (check .env creds).")
+        return results
+    rows = source.find_businesses(keyword, place,
+                                  location_name=location_name,
+                                  location_code=location_code,
+                                  max_results=max_results)
     results["found"] = len(rows)
     if not rows:
         return results
@@ -316,15 +380,20 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
     results["stored"] = store
     if store and not campaign_id:
         # Stable per-target campaign: find-or-create by target_key (a hash of
-        # keyword|place|niche). Re-running the same target REUSES this campaign
-        # instead of spawning a duplicate, so history + dedup accumulate in one
-        # place. Older rows that predate target_key (all blank) are untouched.
+        # seller|keyword|place|niche). Re-running the same target for the SAME
+        # seller REUSES this campaign instead of spawning a duplicate, so history
+        # + dedup accumulate in one place. Older rows that predate target_key
+        # (all blank) are untouched.
         target_key = hashlib.sha1(
-            f"{keyword}|{place}|{niche}".encode("utf-8")).hexdigest()
+            f"{resolved_seller_id or ''}|{keyword}|{place}|{niche}"
+            .encode("utf-8")).hexdigest()
         existing = []
         try:
+            _lookup = {"target_key": target_key}
+            if resolved_seller_id:
+                _lookup["seller_id"] = resolved_seller_id
             existing = supabase_store.select_rows(
-                "campaigns", columns="id", filters={"target_key": target_key})
+                "campaigns", columns="id", filters=_lookup)
         except Exception as e:
             results["errors"].append(f"campaign lookup failed: {e}")
         if existing and existing[0].get("id"):
@@ -332,7 +401,7 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
             results["campaign_reused"] = True
         else:
             require_cf, cf_floor = _confidence_gate()
-            created = supabase_store.insert_rows("campaigns", {
+            _new_campaign = {
                 "name": campaign_name or f"{keyword} - {place}",
                 "keyword": keyword,
                 "location": place,
@@ -346,7 +415,10 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
                     "require_confidence_floor": require_cf,
                     "confidence_floor": cf_floor,
                 },
-            })
+            }
+            if resolved_seller_id:
+                _new_campaign["seller_id"] = resolved_seller_id
+            created = supabase_store.insert_rows("campaigns", _new_campaign)
             campaign_id = (created or [{}])[0].get("id")
         results["campaign_id"] = campaign_id
 
@@ -388,8 +460,17 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
                     p["status"] = "duplicate"
                     p["duplicate_of"] = duplicates[i]
                     dup_built.append(p)
-            created_prospects = supabase_store.insert_rows(
-                "prospects", new_built + dup_built)
+            created_prospects = []
+            # PostgREST bulk insert requires UNIFORM keys across every row in one
+            # POST. new and duplicate rows carry different keys (dups add
+            # status/duplicate_of), so insert each set separately or a mixed batch
+            # trips PGRST102 "All object keys must match".
+            if new_built:
+                created_prospects += supabase_store.insert_rows(
+                    "prospects", new_built)
+            if dup_built:
+                created_prospects += supabase_store.insert_rows(
+                    "prospects", dup_built)
             order = ([i for i in range(len(rows)) if i not in duplicates]
                      + list(duplicates.keys()))
             for idx, p in zip(order, created_prospects):
@@ -453,7 +534,7 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         reasons, first_line = [], ""
         qualified = False
         scored_ok = False
-        if row.get("business_name") and eligible:
+        if row.get("business_name") and eligible and llm_provider is not None:
             try:
                 hints = [str(score_extra_hints)] if score_extra_hints else []
                 if row.get("book_online_url"):
@@ -463,9 +544,9 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
                         "booking, treat that as a strong reason this business is "
                         "NOT a prospect.")
                 hints.append(cfg["hint"])
-                judged = groq_ai.score_lead(
-                    row, intelligence, niche,
-                    extra_hints="\n\n".join(hints), model=score_model,
+                judged = llm.score_lead(
+                    llm_provider, row, intelligence, niche,
+                    extra_hints="\n\n".join(hints),
                     breakdown=breakdown)
                 opportunity = max(0, min(
                     100, int(judged.get("opportunity_score", 0) or 0)))
@@ -577,6 +658,9 @@ def main():
     ap.add_argument("-n", "--max-results", type=int, default=6)
     ap.add_argument("--campaign-id", default=None)
     ap.add_argument("--campaign-name", default=None)
+    ap.add_argument("--seller-id", default=None,
+                    help="seller_profile uuid owning this campaign "
+                         "(falls back to DEFAULT_SELLER_ID)")
     ap.add_argument("--scrutiny", default=None,
                     help="strict | balanced | lenient (default from .env)")
     ap.add_argument("--social-platforms", default=None,
@@ -592,6 +676,7 @@ def main():
             location_name=args.location_name,
             campaign_id=args.campaign_id,
             campaign_name=args.campaign_name,
+            seller_id=args.seller_id,
             scrutiny=args.scrutiny,
             social_platforms=args.social_platforms,
         )

@@ -1,0 +1,259 @@
+{
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "31ecc7f9-f28c-4780-82ca-66eff6136b40",
+      "name": "Run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "fields": {
+          "values": [
+            {
+              "name": "keyword"
+            },
+            {
+              "name": "place",
+              "stringValue": "Surulere,Lagos"
+            },
+            {
+              "name": "niche",
+              "stringValue": "I sell medical instruments"
+            },
+            {
+              "name": "max_results",
+              "type": "numberValue",
+              "numberValue": "6"
+            },
+            {
+              "name": "location_name"
+            },
+            {
+              "name": "campaign_id"
+            },
+            {
+              "name": "scrutiny",
+              "stringValue": "balanced"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4c855e99-f5e3-4079-9ec7-2a065901ddd3",
+      "name": "Campaign Inputs",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        -128,
+        352
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/campaign",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "id": "3d4ed590-eee5-434d-bf7a-6dc1453a9777",
+      "name": "Run /campaign (find-enrich-score-store)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        48,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/leads",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify({ campaign_id: $json.campaign_id, scope: $json.scope }) }}"
+      },
+      "id": "055aafe8-afee-430b-a78f-a099fbf1fbc3",
+      "name": "Pull /leads (new)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = $json;\nconst leads = (out.leads || []).map(l => ({\n  lead_id: l.id,\n  prospect_id: l.prospect_id,\n  business: l.business_name,\n  category: l.category,\n  phone: l.phone,\n  email: (Array.isArray(l.emails) ? l.emails : []).join(', '),\n  website: l.website,\n  score: l.opportunity_score,\n  qualified: l.qualified,\n  why: l.weakness,\n  first_line: l.first_line,\n  created_at: l.created_at\n}));\n// Each returned row is one pending lead to review.\nreturn leads;"
+      },
+      "id": "9e993f02-d14c-4811-9ae2-485877ff3a91",
+      "name": "Expand to review rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://127.0.0.1:5000/leads/status",
+        "options": {}
+      },
+      "id": "7cc8093f-ae80-45b0-bfe2-d2624593a7c1",
+      "name": "Mark contacted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        416,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "84cb25cc-ffb8-4f1b-b90d-bc0a9ae06dd1",
+              "name": "campaign_id",
+              "value": "5298abc6-d743-4803-9c82-6e7dca93ce8e",
+              "type": "string"
+            },
+            {
+              "id": "47588096-8846-41e2-9114-bccf42e03a1b",
+              "name": "scope",
+              "value": "unprocessed",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -288,
+        576
+      ],
+      "id": "4b6aa2b5-6e75-4bc6-82c6-e123d6311e50",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/campaigns/summary",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -288,
+        160
+      ],
+      "id": "6acf0df8-7e9b-45c8-92cb-52992588143f",
+      "name": "Get Campaign ID"
+    },
+    {
+      "parameters": {
+        "formTitle": "Your Basic Information",
+        "formDescription": "This details is required",
+        "formFields": {
+          "values": [
+            {},
+            {
+              "fieldType": "file"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        512,
+        272
+      ],
+      "id": "12f54a6a-7b84-4655-a486-7fc03b1acc6f",
+      "name": "On form submission",
+      "webhookId": "8b48b318-0f4a-40e8-bcd8-2ef26f501d39"
+    }
+  ],
+  "connections": {
+    "Run": {
+      "main": [
+        [
+          {
+            "node": "Campaign Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Campaign Inputs": {
+      "main": [
+        [
+          {
+            "node": "Run /campaign (find-enrich-score-store)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pull /leads (new)": {
+      "main": [
+        [
+          {
+            "node": "Expand to review rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand to review rows": {
+      "main": [
+        [
+          {
+            "node": "Mark contacted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Pull /leads (new)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "4774e86600f7798ac7a7dcd3b929ecae2249a22982716f853737c2affdd6e33b"
+  }
+}

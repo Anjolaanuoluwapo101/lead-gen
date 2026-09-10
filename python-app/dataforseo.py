@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import requests
 
 # --------------------------------------------------------------------------- #
@@ -57,6 +58,7 @@ LOGIN = os.environ.get("DATAFORSEO_LOGIN", "").strip()
 PASSWORD = os.environ.get("DATAFORSEO_PASSWORD", "").strip()
 
 LIVE_MAPS_URL = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced"
+GOOGLE_LOC_URL = "https://api.dataforseo.com/v3/serp/google/locations"
 
 # US state abbreviations -> full names for turning "Austin, TX" into a
 # DataForSEO location_name like "Austin,Texas,United States".
@@ -203,8 +205,12 @@ def map_item(item):
 
 
 def scrape_maps(keyword, place, location_name=None, location_code=None,
-                max_results=10):
-    if not (LOGIN and PASSWORD):
+                max_results=10, login=None, password=None):
+    # login/password may be passed per-call (seller-scoped via the providers
+    # source adapter); when omitted they fall back to the master env creds.
+    login = (login or LOGIN or "").strip()
+    password = (password or PASSWORD or "").strip()
+    if not (login and password):
         raise RuntimeError(
             "Missing credentials. Copy .env.example to .env and fill "
             "DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD.")
@@ -227,7 +233,7 @@ def scrape_maps(keyword, place, location_name=None, location_code=None,
     resp = requests.post(
         LIVE_MAPS_URL,
         json=payload,
-        auth=(LOGIN, PASSWORD),
+        auth=(login, password),
         timeout=60,
     )
     resp.raise_for_status()
@@ -241,18 +247,217 @@ def scrape_maps(keyword, place, location_name=None, location_code=None,
     return rows, body
 
 
+# --------------------------------------------------------------------------- #
+# Location-code lookup (for finding a location_code to hand to scrape_maps).
+#
+# DataForSEO's locations endpoint returns the WHOLE world (~270k rows) per call
+# with no server-side country filter, so to resolve any country we download it
+# exactly ONCE and cache it in a local file (data/locations.json). Afterwards
+# every lookup is a local file read + in-memory scan: DataForSEO is never re-hit
+# and no per-country restriction lingers. The cache is local DISK, not Supabase,
+# so it costs nothing against the DB free tier. Per-place results are memoized
+# to a second small file (data/location_memo.json) so a repeated place is instant.
+# --------------------------------------------------------------------------- #
+_DATA_DIR = os.path.join(HERE, "data")
+os.makedirs(_DATA_DIR, exist_ok=True)
+_LOCATIONS_FILE = os.path.join(_DATA_DIR, "locations.json")       # world list
+_MEMO_FILE = os.path.join(_DATA_DIR, "location_memo.json")        # place lookups
+
+_LOCATIONS = None            # in-memory copy of the full world list
+_MEMO = None                 # place-key -> resolved result
+_TYPE_RANK = {"City": 0, "Neighborhood": 1, "District": 2, "Region": 3,
+              "State": 4, "Country": 6}            # City first (most specific)
+# For BROAD/partial matches we want the biggest useful container first (the
+# thing you'd actually set as location_code), not a random sibling.
+_BROAD_ORDER = {"Country": 0, "Region": 1, "State": 2, "City": 3}
+
+
+def _norm(s):
+    """Case/accent/punctuation-insensitive form for matching location names.
+    Turns any non-alphanumeric run into a space so "Yaba,Lagos,Nigeria" becomes
+    the three words "yaba lagos nigeria" (commas/hyphens/slashes must not glue
+    tokens together)."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore")
+    s = s.decode("ascii").lower()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return " ".join(s.split())
+
+
+def _load_json_file(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def _save_json_file(path, obj):
+    """Atomic write (write to .tmp then replace) so a crash can't leave a
+    half-written cache behind."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh)
+    os.replace(tmp, path)
+
+
+def _load_locations():
+    """Full world list, seeded once from DataForSEO into a local file; thereafter
+    served from the file + in-memory. The bulk download happens exactly once."""
+    global _LOCATIONS
+    if _LOCATIONS is not None:
+        return _LOCATIONS
+    locs = _load_json_file(_LOCATIONS_FILE)
+    if not locs:
+        resp = requests.get(GOOGLE_LOC_URL, auth=(LOGIN, PASSWORD), timeout=180)
+        resp.raise_for_status()
+        body = resp.json()
+        locs = ((body.get("tasks") or [{}])[0].get("result") or [])
+        _save_json_file(_LOCATIONS_FILE, locs)
+    _LOCATIONS = locs
+    return _LOCATIONS
+
+
+def _load_memo():
+    global _MEMO
+    if _MEMO is None:
+        _MEMO = _load_json_file(_MEMO_FILE) or {}
+    return _MEMO
+
+
+def _save_memo():
+    if _MEMO is not None:
+        _save_json_file(_MEMO_FILE, _MEMO)
+
+
+def _resolve(place):
+    """Rank every candidate DataForSEO row for a place (uncached core). Returns
+    the full ranked list; the caller slices it to its desired `top`."""
+    locs = _load_locations()
+    q = _norm(place)
+    tokens = [t for t in re.split(r"[,\s]+", q) if t and len(t) >= 2]
+    if not tokens:
+        return {"place": place, "exact": False, "count": 0, "matches": [],
+                "note": "Give a place like 'Yaba, Lagos' or 'Lagos, Nigeria'."}
+
+    exact_rows, broad_rows = [], []
+    for x in locs:
+        name = _norm(x.get("location_name") or "")
+        if not name:
+            continue
+        ty = x.get("location_type") or ""
+        if ty == "Postal Code":                   # never useful as a selector
+            continue
+        words = set(name.split())
+        if q and q in name:                       # whole query is a substring
+            hit = len(tokens)
+        else:
+            # WORD-level match so short tokens ("idi") don't false-match inside
+            # other words ("Vidin"). Surulere/Idi-Araba -> not a word anywhere.
+            hit = sum(1 for t in tokens if t in words)
+        if hit == 0:
+            continue
+        is_exact = hit == len(tokens)
+        if is_exact:
+            spec = _TYPE_RANK.get(ty, 5)          # City=0 first (most specific)
+            exact_rows.append((spec, len(name), x))
+        else:
+            # container (State/Country) first so "Surulere, Lagos" suggests
+            # Lagos State (21564) — the location you'd actually use.
+            brank = _BROAD_ORDER.get(ty, 9)
+            broad_rows.append((-hit, brank, len(name), x))
+
+    exact_rows.sort(key=lambda z: (z[0], z[1]))
+    broad_rows.sort(key=lambda z: (z[0], z[1], z[2]))
+    exact = bool(exact_rows)
+
+    # exact rows first (City/Neighborhood up front), then broad containers.
+    matches = [{
+        "location_code": x["location_code"],
+        "location_name": x["location_name"],
+        "location_type": x.get("location_type"),
+        "country_iso_code": x.get("country_iso_code"),
+        "location_code_parent": x.get("location_code_parent"),
+        "exact": True,
+    } for (_, _, x) in exact_rows]
+    matches += [{
+        "location_code": x["location_code"],
+        "location_name": x["location_name"],
+        "location_type": x.get("location_type"),
+        "country_iso_code": x.get("country_iso_code"),
+        "location_code_parent": x.get("location_code_parent"),
+        "exact": False,
+    } for (_, _, _, x) in broad_rows]
+
+    note = ""
+    if not exact:
+        note = ("No DataForSEO location matches every word you gave (the "
+                "country's list is coarse and omits some areas). Showing the "
+                "nearest broader matches — for an area with no own code, pick "
+                "its parent State and area-filter the results by locality.")
+    return {"place": place, "exact": exact, "count": len(matches),
+            "matches": matches, "note": note}
+
+
+def lookup_location(place, top=8):
+    """
+    Turn a human place string ("Yaba, Lagos", "Lekki, Nigeria", "Houston, TX")
+    into candidate DataForSEO location_code rows. Matches case-insensitively and
+    ignores hyphens/accents. Ranks Cities/Neighborhoods above whole
+    States/Countries. Uses the cached world list (seed once) — no per-lookup
+    network call — and memoizes each result so a repeated place is instant.
+    Honest caveat: DataForSEO's list is coarse — some places (Surulere,
+    Idi-Araba, ...) have NO location_code. When none matches every word,
+    `exact` is False and the matches are the nearest broader containers (e.g.
+    Lagos State 21564) to area-filter on.
+    """
+    if not (LOGIN and PASSWORD):
+        raise RuntimeError(
+            "Missing credentials. Copy .env.example to .env and fill "
+            "DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD.")
+
+    key = _norm(place)
+    memo = _load_memo()
+    if key not in memo:
+        memo[key] = _resolve(place)
+        _save_memo()
+
+    res = dict(memo[key])                 # shallow copy: caller must not mutate
+    res["matches"] = res["matches"][:max(1, int(top))]
+    res["count"] = len(res["matches"])
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Find businesses via DataForSEO Google Maps (hostable).")
-    ap.add_argument("keyword", help="e.g. 'plumbers'")
-    ap.add_argument("place", help="e.g. 'Austin, TX'")
+    # keyword/place are optional because --seed-locations needs neither.
+    ap.add_argument("keyword", nargs="?", help="e.g. 'plumbers'")
+    ap.add_argument("place", nargs="?", help="e.g. 'Austin, TX'")
     ap.add_argument("-n", "--max-results", type=int, default=10)
     ap.add_argument("--location-name", help="override DataForSEO location_name")
     ap.add_argument("--json", action="store_true",
                     help="print mapped rows as JSON")
+    ap.add_argument("--seed-locations", action="store_true",
+                    help="download + cache the DataForSEO world location list "
+                         "once into data/locations.json (then exit; lookups are "
+                         "offline from then on)")
     ap.add_argument("--raw", action="store_true",
                     help="print the raw API response body (for debugging)")
     args = ap.parse_args()
+
+    if args.seed_locations:
+        try:
+            locs = _load_locations()
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Cached {len(locs)} locations -> {_LOCATIONS_FILE}")
+        sys.exit(0)
+
+    if not (args.keyword and args.place):
+        ap.error("keyword and place are required (unless using --seed-locations)")
 
     try:
         rows, body = scrape_maps(

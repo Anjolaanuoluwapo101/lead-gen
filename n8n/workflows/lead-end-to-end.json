@@ -54,6 +54,12 @@
               "name": "scrutiny",
               "value": "strict",
               "type": "string"
+            },
+            {
+              "id": "inp-sellerid",
+              "name": "seller_id",
+              "value": "",
+              "type": "string"
             }
           ]
         }

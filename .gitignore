@@ -11,4 +11,5 @@ python-app/.browser-profile/
 python-app/outputs/
 python-app/__pycache__/
 python-app/.env
+python-app/data/
 *.csv

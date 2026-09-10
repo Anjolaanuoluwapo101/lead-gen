@@ -284,7 +284,7 @@ def normalize_link(link, base_url, page_path):
 # --------------------------------------------------------------------------- #
 EMAIL_PATTERN = re.compile(r'[a-z0-9\.\-+_]+@[a-z0-9\.\-]+\.[a-z]{2,}', re.I)
 EMAIL_JUNK_DOMAINS = ("example.com", "sentry.io", "wixpress.com", "godaddy.com",
-                      "yourdomain.com", "domain.com", "email.com")
+                      "yourdomain.com", "domain.com", "email.com", "address.com")
 
 
 def extract_emails(text):

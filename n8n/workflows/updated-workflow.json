@@ -1,0 +1,1047 @@
+{
+  "name": "Seller-scoped lead-gen (8 flows)",
+  "nodes": [
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/seller",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "id": "f1a00001-0000-4000-8000-000000000003",
+      "name": "Seller · create /seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f2a00001-0000-4000-8000-000000000001",
+      "name": "Run campaign (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f2a00001-0000-4000-8000-000000000011",
+              "name": "email",
+              "value": "you@example.com",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f2a00001-0000-4000-8000-000000000002",
+      "name": "Run · operator email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -380,
+        260
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/by-email?email={{ encodeURIComponent($json.email) }}",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "id": "f2a00001-0000-4000-8000-000000000003",
+      "name": "Run · resolve seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  // --- core (engine fills any blank from defaults) ---\n  seller_id: $json.seller.id,\n  keyword: 'medical instruments',\n  place: 'Surulere, Lagos',\n  niche: 'I sell medical instruments',\n  // --- how many / how strict ---\n  max_results: 6,\n  scrutiny: 'balanced', // 'strict' | 'balanced' | 'lenient'\n  // --- DataForSEO location pinning (bare Lagos-area names often resolve to 0) ---\n  location_name: null, // city/country, e.g. 'Lagos' when 'place' is a bare neighbourhood\n  location_code: null, // a DataForSEO code beats location_name whenever you have one\n  // --- resume / name the campaign ---\n  campaign_id: null, // resume an EXISTING campaign instead of a brand-new run\n  campaign_name: null, // friendly label for the new campaign\n  // --- enrichment depth (null = engine defaults) ---\n  enrich_max_count: null, // cap websites to crawl (default 12)\n  enrich_max_depth: null, // crawl link depth (default 1)\n  enrich_analyze_pages_limit: null, // pages analyzed per site\n  all_domains: false, // true = crawl whole domain; false = same-site only\n  // --- scoring ---\n  score_model: null, // e.g. 'groq' | 'openai' | 'openrouter' | 'anthropic'\n  score_extra_hints: null, // extra instructions injected into the scoring prompt\n  // --- optional social deep-fetch ---\n  social_platforms: null // e.g. ['facebook', 'instagram']\n};"
+      },
+      "id": "f2a00001-0000-4000-8000-000000000004",
+      "name": "Run · campaign payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/campaign",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "id": "f2a00001-0000-4000-8000-000000000005",
+      "name": "Run · POST /campaign",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        160,
+        260
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f3a00001-0000-4000-8000-000000000001",
+      "name": "Review leads (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f3a00001-0000-4000-8000-000000000011",
+              "name": "email",
+              "value": "you@example.com",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f3a00001-0000-4000-8000-000000000002",
+      "name": "Review · operator email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -580,
+        520
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/by-email?email={{ encodeURIComponent($json.email) }}",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "id": "f3a00001-0000-4000-8000-000000000003",
+      "name": "Review · resolve seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/campaigns/summary",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify({ seller_id: $json.seller.id }) }}"
+      },
+      "id": "f3a00001-0000-4000-8000-000000000004",
+      "name": "Review · list my campaigns",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Paste a campaign_id from the 'Review · list my campaigns' output above.\nreturn {\n  seller_id: $json.seller.id,\n  campaign_id: 'PASTE-CAMPAIGN-ID-FROM-SUMMARY',\n  scope: 'unprocessed', // 'unprocessed' (status new) | 'all' (every status)\n  since: null, // high-water cursor from /leads next_cursor; null = accumulated (every matching lead)\n  limit: 200 // max rows returned this pull\n};"
+      },
+      "id": "f3a00001-0000-4000-8000-000000000005",
+      "name": "Review · lead payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/leads",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "id": "f3a00001-0000-4000-8000-000000000006",
+      "name": "Review · POST /leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const leads = ($json.leads || []).map(l => ({\n  lead_id: l.id,\n  prospect_id: l.prospect_id,\n  business: l.business_name,\n  category: l.category,\n  phone: l.phone,\n  email: (Array.isArray(l.emails) ? l.emails : []).join(', '),\n  website: l.website,\n  score: l.opportunity_score,\n  qualified: l.qualified,\n  why: l.weakness,\n  first_line: l.first_line,\n  created_at: l.created_at\n}));\n// One row per pending lead to review. Feed a lead_id into the Draft flow.\nreturn leads;"
+      },
+      "id": "f3a00001-0000-4000-8000-000000000007",
+      "name": "Review · expand to rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        680
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f4a00001-0000-4000-8000-000000000001",
+      "name": "Draft email (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f4a00001-0000-4000-8000-000000000011",
+              "name": "email",
+              "value": "you@example.com",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f4a00001-0000-4000-8000-000000000002",
+      "name": "Draft · operator email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -380,
+        900
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/by-email?email={{ encodeURIComponent($json.email) }}",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "id": "f4a00001-0000-4000-8000-000000000003",
+      "name": "Draft · resolve seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  seller_id: $json.seller.id,\n  lead_id: 'PASTE-LEAD-ID-FROM-PULL'\n};"
+      },
+      "id": "f4a00001-0000-4000-8000-000000000004",
+      "name": "Draft · payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/draft",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "id": "f4a00001-0000-4000-8000-000000000005",
+      "name": "Draft · POST /draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        160,
+        900
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f5a00001-0000-4000-8000-000000000001",
+      "name": "Mark contacted (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        1140
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f5a00001-0000-4000-8000-000000000011",
+              "name": "email",
+              "value": "you@example.com",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f5a00001-0000-4000-8000-000000000002",
+      "name": "Mark · operator email",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        -380,
+        1140
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/by-email?email={{ encodeURIComponent($json.email) }}",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "id": "f5a00001-0000-4000-8000-000000000003",
+      "name": "Mark · resolve seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        1140
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// lead_ids = the lead(s) you just emailed. status flips 'new' -> 'contacted'\n// so they drop out of the next unprocessed pull (no double-send).\nreturn {\n  seller_id: $json.seller.id,\n  lead_ids: ['PASTE-LEAD-ID'],\n  status: 'contacted'\n};"
+      },
+      "id": "f5a00001-0000-4000-8000-000000000004",
+      "name": "Mark · payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        1140
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/leads/status",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "id": "f5a00001-0000-4000-8000-000000000005",
+      "name": "Mark · POST /leads-status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        160,
+        1140
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/by-email?email={{ encodeURIComponent($json.email) }}",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "name": "Config ·resolve seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        1420
+      ],
+      "id": "d3251eaf-ebf5-4dee-9ea0-c8409e2d1638"
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/{{ $json.seller.id }}/config",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "name": "Config ·view config (masked)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        1260
+      ],
+      "id": "44b3ce13-f05e-435d-882e-e187c341df8c"
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $('Seller config (form)').first().json || {};\nconst pick = (prefix) => {\n  const o = {};\n  ['provider','model','base_url','api_key','login','password'].forEach(k => {\n    const v = f[prefix + '_' + k];\n    if (v != null && String(v).trim() !== '') o[k] = String(v).trim();\n  });\n  return Object.keys(o).length ? o : null;\n};\nreturn {\n  seller_id: $json.seller.id,\n  llm: pick('llm'),\n  finder: pick('finder')\n};"
+      },
+      "name": "Config · build payload (form -> llm/finder)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        1580
+      ],
+      "id": "d23ba5c4-fdef-4773-a4d4-232cd7c3905c"
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/seller/{{ $json.seller_id }}/config",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "name": "Config ·PATCH /config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        1580
+      ],
+      "id": "cdf0d011-25e2-47e1-bae5-3911a818ba20"
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/by-email?email={{ encodeURIComponent($json.email) }}",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "name": "Portfolio ·resolve seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        1680
+      ],
+      "id": "85c0443d-93ed-4731-a2da-307a6ff1e4a0"
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $('Portfolio upload (form)').first().json || {};\nreturn {\n  seller_id: $json.seller.id,\n  url: f.url || '',\n  render_mode: (f.render_mode && String(f.render_mode).trim()) ? f.render_mode : null\n};"
+      },
+      "name": "Portfolio · build payload (url -> scrape)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        1840
+      ],
+      "id": "b8447ab1-7b3e-4e43-ac19-7bb3e7694a75"
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/seller/{{ $json.seller_id }}/portfolio",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "name": "Portfolio ·POST /portfolio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        1840
+      ],
+      "id": "da0388ac-45d1-49c9-8e78-f770b70b6103"
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "http://127.0.0.1:5000/seller/by-email?email={{ encodeURIComponent($json.email) }}",
+        "allowUnauthorizedCerts": true,
+        "options": {}
+      },
+      "name": "Resume ·resolve seller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        1940
+      ],
+      "id": "2ea0cc73-57f1-44bc-affa-cb299109fa3b"
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "http://127.0.0.1:5000/seller/{{ $json.seller_id }}/resume",
+        "allowUnauthorizedCerts": true,
+        "jsonParameters": true,
+        "options": {},
+        "bodyParametersJson": "={{ JSON.stringify($json) }}"
+      },
+      "name": "Resume ·POST /resume",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        2100
+      ],
+      "id": "660424c8-45ac-4f6e-9701-4ea7dc450404"
+    },
+    {
+      "parameters": {
+        "formTitle": "Upload a seller resume",
+        "formDescription": "Used to personalize this seller's outreach drafts.",
+        "formFields": {
+          "values": [
+            {
+              "fieldName": "email",
+              "fieldLabel": "Seller email",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "you@example.com"
+            },
+            {
+              "fieldName": "resume",
+              "fieldLabel": "Resume (.docx / .pdf)",
+              "fieldType": "file",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -560,
+        1940
+      ],
+      "id": "6337d998-45a0-4265-bf31-eb229c5005d4",
+      "name": "Resume upload (form)",
+      "webhookId": "5dd698a0-b149-49bd-a6ec-4e87561b0d81"
+    },
+    {
+      "parameters": {
+        "jsCode": "const first = $('Resume upload (form)').first();\nconst bin = (first && first.binary) || {};\nconst keys = Object.keys(bin);\nconst file = keys.length ? bin[keys[0]] : null;\n// Pull the uploaded file off the form trigger (HTTP dropped local binary).\nreturn {\n  seller_id: $json.seller.id,\n  filename: file ? (file.fileName || 'resume.pdf') : 'resume.pdf',\n  content_base64: file ? file.data : ''\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        2100
+      ],
+      "id": "3f43b1a5-45b5-4247-bc1e-a4d02eae4940",
+      "name": "Resume · build payload (file -> base64)"
+    },
+    {
+      "parameters": {
+        "formTitle": "Create or look up your seller profile",
+        "formDescription": "Only email is required; fill whatever identity you have. Blanks are ignored.",
+        "formFields": {
+          "values": [
+            {
+              "fieldName": "email",
+              "fieldLabel": "Email (unique key)",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "you@example.com"
+            },
+            {
+              "fieldName": "name",
+              "fieldLabel": "Name",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "title",
+              "fieldLabel": "Title / role",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "brand",
+              "fieldLabel": "Brand / business name",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "phone",
+              "fieldLabel": "Phone",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "render_mode",
+              "fieldLabel": "Render mode",
+              "fieldType": "text",
+              "placeholder": "auto | html | js"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -560,
+        0
+      ],
+      "id": "57c5c27e-9dfa-45b6-aed5-581b919be7e6",
+      "name": "Seller setup (form)",
+      "webhookId": "92f11740-c0a3-4202-86fa-d6b11b3baa1b"
+    },
+    {
+      "parameters": {
+        "formTitle": "Scrape a seller’s portfolio website",
+        "formDescription": "Give the seller email + the website URL. Text is extracted and stored for drafts.",
+        "formFields": {
+          "values": [
+            {
+              "fieldName": "email",
+              "fieldLabel": "Seller email",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "you@example.com"
+            },
+            {
+              "fieldName": "url",
+              "fieldLabel": "Website URL",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "https://example.com"
+            },
+            {
+              "fieldName": "render_mode",
+              "fieldLabel": "Render mode",
+              "fieldType": "text",
+              "placeholder": "auto | html | js"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -700,
+        1680
+      ],
+      "id": "870e76cc-1993-4e28-8b39-cb0662785b54",
+      "name": "Portfolio upload (form)",
+      "webhookId": "e0400058-329c-46f3-90d4-7d04f2f3d6c1"
+    },
+    {
+      "parameters": {
+        "formTitle": "Seller provider configuration",
+        "formDescription": "Set this seller’s LLM + finder (DataForSEO) providers. API keys are encrypted before storage. Leave a field blank to keep its current value.",
+        "formFields": {
+          "values": [
+            {
+              "fieldName": "email",
+              "fieldLabel": "Seller email",
+              "fieldType": "text",
+              "requiredField": true,
+              "placeholder": "you@example.com"
+            },
+            {
+              "fieldName": "llm_provider",
+              "fieldLabel": "LLM provider",
+              "fieldType": "text",
+              "placeholder": "groq | openai | openrouter | anthropic"
+            },
+            {
+              "fieldName": "llm_model",
+              "fieldLabel": "LLM model",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "llm_base_url",
+              "fieldLabel": "LLM base URL",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "llm_api_key",
+              "fieldLabel": "LLM API key",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "finder_provider",
+              "fieldLabel": "Finder provider",
+              "fieldType": "text",
+              "placeholder": "dataforseo"
+            },
+            {
+              "fieldName": "finder_login",
+              "fieldLabel": "Finder login (email)",
+              "fieldType": "text"
+            },
+            {
+              "fieldName": "finder_password",
+              "fieldLabel": "Finder password",
+              "fieldType": "text"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -760,
+        1420
+      ],
+      "id": "3109fda3-ad5d-4fd8-8e0a-08927b2ee326",
+      "name": "Seller config (form)",
+      "webhookId": "bc69c70e-5c0f-4832-9b6d-7c8ad61c43ac"
+    }
+  ],
+  "connections": {
+    "Run campaign (manual)": {
+      "main": [
+        [
+          {
+            "node": "Run · operator email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run · operator email": {
+      "main": [
+        [
+          {
+            "node": "Run · resolve seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run · resolve seller": {
+      "main": [
+        [
+          {
+            "node": "Run · campaign payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run · campaign payload": {
+      "main": [
+        [
+          {
+            "node": "Run · POST /campaign",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review leads (manual)": {
+      "main": [
+        [
+          {
+            "node": "Review · operator email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review · operator email": {
+      "main": [
+        [
+          {
+            "node": "Review · resolve seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review · resolve seller": {
+      "main": [
+        [
+          {
+            "node": "Review · list my campaigns",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Review · lead payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review · lead payload": {
+      "main": [
+        [
+          {
+            "node": "Review · POST /leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review · POST /leads": {
+      "main": [
+        [
+          {
+            "node": "Review · expand to rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft email (manual)": {
+      "main": [
+        [
+          {
+            "node": "Draft · operator email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft · operator email": {
+      "main": [
+        [
+          {
+            "node": "Draft · resolve seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft · resolve seller": {
+      "main": [
+        [
+          {
+            "node": "Draft · payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draft · payload": {
+      "main": [
+        [
+          {
+            "node": "Draft · POST /draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark contacted (manual)": {
+      "main": [
+        [
+          {
+            "node": "Mark · operator email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark · operator email": {
+      "main": [
+        [
+          {
+            "node": "Mark · resolve seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark · resolve seller": {
+      "main": [
+        [
+          {
+            "node": "Mark · payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark · payload": {
+      "main": [
+        [
+          {
+            "node": "Mark · POST /leads-status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config ·resolve seller": {
+      "main": [
+        [
+          {
+            "node": "Config ·view config (masked)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Config · build payload (form -> llm/finder)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Portfolio ·resolve seller": {
+      "main": [
+        [
+          {
+            "node": "Portfolio · build payload (url -> scrape)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resume ·resolve seller": {
+      "main": [
+        [
+          {
+            "node": "Resume · build payload (file -> base64)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resume upload (form)": {
+      "main": [
+        [
+          {
+            "node": "Resume ·resolve seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resume · build payload (file -> base64)": {
+      "main": [
+        [
+          {
+            "node": "Resume ·POST /resume",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seller setup (form)": {
+      "main": [
+        [
+          {
+            "node": "Seller · create /seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Portfolio upload (form)": {
+      "main": [
+        [
+          {
+            "node": "Portfolio ·resolve seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Portfolio · build payload (url -> scrape)": {
+      "main": [
+        [
+          {
+            "node": "Portfolio ·POST /portfolio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seller config (form)": {
+      "main": [
+        [
+          {
+            "node": "Config ·resolve seller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config · build payload (form -> llm/finder)": {
+      "main": [
+        [
+          {
+            "node": "Config ·PATCH /config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {},
+  "meta": {
+    "instanceId": "4774e86600f7798ac7a7dcd3b929ecae2249a22982716f853737c2affdd6e33b"
+  }
+}
