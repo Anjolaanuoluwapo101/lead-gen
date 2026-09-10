@@ -95,6 +95,35 @@ def to_places_location(place):
     return place.replace(" ", "_")
 
 
+def _best_location_match(place, matches):
+    """
+    Pick the candidate that actually IS `place`. DataForSEO's ranking is loose
+    (looking up "Lagos, Nigeria" returns Epe and Ikeja ahead of Lagos itself),
+    so matches[0] must never be trusted blindly — silently searching the wrong
+    city is worse than returning nothing. Accept a candidate only when its
+    LEADING segment (the city) matches the place's leading segment; among those
+    prefer a City over a Neighborhood, then the shortest name (most specific).
+    Returns None when nothing lines up, so the caller can fall back.
+    """
+    want = _norm((place or "").split(",")[0])
+    if not want:
+        return None
+    cands = [m for m in (matches or []) if m.get("location_code")]
+    if not cands:
+        return None
+
+    def head(m):
+        return _norm((m.get("location_name") or "").split(",")[0])
+
+    def rank(m):
+        return (head(m) != want,                          # city match first
+                (m.get("location_type") or "") != "City", # City over the rest
+                len(m.get("location_name") or ""))        # most specific name
+
+    best = sorted(cands, key=rank)[0]
+    return best if head(best) == want else None
+
+
 def _nested_get(obj, keys, default=""):
     cur = obj
     for k in keys:
@@ -227,7 +256,27 @@ def scrape_maps(keyword, place, location_name=None, location_code=None,
     if location_code:
         request["location_code"] = int(location_code)
     else:
-        request["location_name"] = loc
+        # A non-US place ("Lagos, Nigeria") becomes the invalid location_name
+        # "Lagos,_Nigeria" above, which DataForSEO matches against NOTHING — the
+        # run then comes back empty with no error. So unless the caller named a
+        # location_name explicitly, resolve a real location_code from the cached
+        # world directory (offline, memoized). Falls back to the name guess when
+        # the directory has no confident match (e.g. a place with no code of its
+        # own), preserving the previous behaviour rather than guessing.
+        resolved_code = None
+        if not location_name:
+            try:
+                hit = lookup_location(place, top=25)
+                if hit.get("exact"):
+                    best = _best_location_match(place, hit.get("matches"))
+                    if best:
+                        resolved_code = best.get("location_code")
+            except Exception:
+                resolved_code = None      # directory unavailable -> name guess
+        if resolved_code:
+            request["location_code"] = int(resolved_code)
+        else:
+            request["location_name"] = loc
     payload = [request]
 
     resp = requests.post(

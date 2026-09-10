@@ -83,6 +83,17 @@ DEFAULTS = {
 # Set DEFAULT_SELLER_ID in .env to one of your seller_profile rows' uuids.
 DEFAULT_SELLER_ID = (os.environ.get("DEFAULT_SELLER_ID") or "").strip() or None
 
+
+def _key_part(s):
+    """Normalize one component of a campaign's target_key: trim, lowercase, and
+    collapse whitespace (including spaces around commas). Without this, "Lagos,
+    Nigeria" / "Lagos,Nigeria" / "lagos, nigeria" hash differently and a re-run
+    silently forks a NEW campaign instead of reusing one — splitting the dedup
+    history in two. The raw values are still what get sent to the finder."""
+    s = str(s or "").strip().lower()
+    s = ",".join(p.strip() for p in s.split(","))
+    return " ".join(s.split())
+
 # Enrichment crawl caps — keep a demo run bounded (homepage + a few links).
 ENRICH_MAX_COUNT = 12
 ENRICH_MAX_DEPTH = 1
@@ -283,13 +294,18 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
     """
     keyword = (keyword or DEFAULTS["keyword"]).strip()
     place = (place or DEFAULTS["place"]).strip()
-    niche = (niche or DEFAULTS["niche"]).strip()
+    # Niche is resolved AFTER the seller lookup below: a caller that sends a
+    # niche overrides, a blank one falls back to the seller's stored profile
+    # niche, and only then to the dev default. Kept out of the defaulting here
+    # so a blank never gets silently replaced by "dentist" before we look.
+    niche = (niche or "").strip() or None
     try:
         max_results = int(max_results)
     except (TypeError, ValueError):
         max_results = DEFAULTS["max_results"]
 
     resolved_seller_id = (seller_id or DEFAULT_SELLER_ID or "").strip() or None
+    seller_niche = None
 
     # Resolve this seller's provider config (per-seller settings with env-master
     # fallback) and build the adapters ONCE for the run. A missing/undecryptable
@@ -300,8 +316,8 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
     if supabase_store.configured() and resolved_seller_id:
         try:
             _rows = supabase_store.select_rows(
-                "seller_profile", columns="settings", filters={"id": resolved_seller_id},
-                limit=1)
+                "seller_profile", columns="settings,niche",
+                filters={"id": resolved_seller_id}, limit=1)
             if _rows:
                 raw = _rows[0].get("settings")
                 if isinstance(raw, str):
@@ -311,8 +327,26 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
                         seller_settings = None
                 else:
                     seller_settings = raw
+                seller_niche = _rows[0].get("niche")
         except Exception as e:
             setup_errors.append(f"seller config lookup failed: {e}")
+
+    # Decide the niche for this run: what the seller pitches. Caller's value
+    # wins; else their stored profile niche; else the dev default. Part of the
+    # campaign identity key below, so it stays stable per seller as long as
+    # their profile doesn't change.
+    niche_source = "caller"
+    if not niche:
+        niche = (seller_niche or "").strip() or None
+        if niche:
+            niche_source = "seller_profile"
+        else:
+            # Nothing supplied a niche, so we fall back to the DEV placeholder
+            # ("adds online booking to dental clinics"). That silently scores
+            # every lead against a dental example, so surface it in the result
+            # rather than let a tenant wonder why nothing qualifies.
+            niche = DEFAULTS["niche"]
+            niche_source = "dev_default"
 
     source = None
     try:
@@ -343,6 +377,7 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         "keyword": keyword,
         "place": place,
         "niche": niche,
+        "niche_source": niche_source,
         "max_results": max_results,
         "scrutiny": cfg["tier"],
         "score_threshold": cfg["threshold"],
@@ -358,8 +393,16 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         "stored": False,
         "leads": [],
         "errors": [],
+        "warnings": [],
     }
     results["errors"].extend(setup_errors)
+    if niche_source == "dev_default":
+        results["warnings"].append(
+            "No niche supplied by the caller and none stored on the seller "
+            "profile — falling back to the DEV placeholder %r. Every lead is "
+            "being scored against that, so qualification results are not "
+            "meaningful. Set the seller's niche (PATCH /seller) or pass "
+            "'niche' with the run." % DEFAULTS["niche"])
 
     # ---------------- FIND ---------------- #
     if source is None:
@@ -385,7 +428,8 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         # + dedup accumulate in one place. Older rows that predate target_key
         # (all blank) are untouched.
         target_key = hashlib.sha1(
-            f"{resolved_seller_id or ''}|{keyword}|{place}|{niche}"
+            "|".join(_key_part(p) for p in
+                     (resolved_seller_id, keyword, place, niche))
             .encode("utf-8")).hexdigest()
         existing = []
         try:

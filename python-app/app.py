@@ -383,7 +383,10 @@ def leads_pull():
                         "error": "campaign not found or not owned by this "
                                  "seller"}), 403
 
-    scope = str(data.get("scope", "unprocessed")).strip().lower()
+    # A form that sends scope as an empty string (field left blank) must mean
+    # the default, not an invalid value -- str("") would otherwise 400.
+    scope = (str(data.get("scope") or "unprocessed").strip().lower()
+             or "unprocessed")
     if scope not in ("unprocessed", "all"):
         return jsonify({"ok": False,
                         "error": "scope must be 'unprocessed' or 'all'"}), 400
@@ -646,9 +649,9 @@ def email_scrape():
 # seller, and an operator later PATCH config (settings jsonb) per tenant.
 # ============================================================================== #
 SELLER_RENDER_MODES = {"html", "js", "auto"}
-_SELLER_PATCHABLE = ("name", "title", "brand", "phone", "portfolio_url",
-                     "render_mode", "active")
-_SELLER_COLUMNS = ("id,email,name,title,brand,phone,resume_text,"
+_SELLER_PATCHABLE = ("name", "title", "brand", "niche", "phone",
+                     "portfolio_url", "render_mode", "active")
+_SELLER_COLUMNS = ("id,email,name,title,brand,niche,phone,resume_text,"
                    "portfolio_url,portfolio_text,render_mode,settings,active,"
                    "created_at,updated_at")
 
@@ -669,9 +672,12 @@ def _maybe_bool(value):
 @app.route("/seller", methods=["POST"])
 def seller_create():
     """Find-or-create a seller by email (the natural key the n8n web form uses).
-    Re-posting the same email returns the existing row (idempotent), so a form
-    submit can always safely produce a seller_id. render_mode defaults to 'auto'
-    unless the form says otherwise (html | js | auto)."""
+    Re-posting the same email always yields the same seller_id, so a form submit
+    can safely be repeated. On an EXISTING seller, any profile field the form
+    actually filled in is applied (so re-running the profile form sets a niche
+    instead of silently doing nothing); fields left blank are NOT cleared, since
+    a form only sends what the operator typed. render_mode defaults to 'auto'
+    on create unless the form says otherwise (html | js | auto)."""
     data = request.get_json(force=True) or {}
     email = str(data.get("email") or "").strip().lower()
     if not email or "@" not in email:
@@ -680,16 +686,6 @@ def seller_create():
         return jsonify({"ok": False,
                         "error": "Supabase not configured"}), 503
 
-    try:
-        existing = supabase_store.select_rows(
-            "seller_profile", columns=_SELLER_COLUMNS,
-            filters={"email": email}, limit=1)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    if existing:
-        return jsonify({"ok": True, "created": False,
-                        "seller": existing[0]})
-
     def _text(k):
         """Coerce any scalar (str/int/float) to a trimmed string, else None.
         n8n forms may send numbers (e.g. a phone typed as digits), so never
@@ -697,11 +693,40 @@ def seller_create():
         v = data.get(k)
         return None if v is None else (str(v).strip() or None)
 
+    try:
+        existing = supabase_store.select_rows(
+            "seller_profile", columns=_SELLER_COLUMNS,
+            filters={"email": email}, limit=1)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+    if existing:
+        # Update only the fields the form actually supplied (non-empty).
+        updates = {}
+        for k in ("name", "title", "brand", "niche", "phone"):
+            v = _text(k)
+            if v:
+                updates[k] = v
+        if "render_mode" in data:
+            updates["render_mode"] = _render_mode(data.get("render_mode"))
+        if not updates:
+            return jsonify({"ok": True, "created": False, "updated": False,
+                            "seller": existing[0]})
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            updated = supabase_store.update_rows(
+                "seller_profile", updates, {"id": existing[0]["id"]})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+        return jsonify({"ok": True, "created": False, "updated": True,
+                        "seller": (updated or existing)[0]})
+
     row = {
         "email": email,
         "name": _text("name"),
         "title": _text("title"),
         "brand": _text("brand"),
+        "niche": _text("niche"),
         "phone": _text("phone"),
         "render_mode": _render_mode(data.get("render_mode")),
     }
@@ -1075,6 +1100,17 @@ def draft():
     # context) AND their settings (provider config). The settings jsonb (which
     # can hold encrypted provider keys) is NEVER handed to the model.
     seller_id = _resolve_draft_seller(data, campaign_seller_id)
+    # Read-scoping: a draft is composed from BOTH the lead's business context and
+    # the seller's own identity (name/brand/resume/portfolio) using the seller's
+    # credentials, so the resolved seller must actually own the lead's campaign
+    # (mirrors /leads and /leads/status). Without this gate, one tenant could
+    # pass another tenant's lead_id and read that business's details back out of
+    # the generated draft. A lead we can't attribute to a campaign is refused,
+    # because ownership then cannot be verified at all.
+    if seller_id and not _seller_owns_campaign(seller_id, campaign_id):
+        return jsonify({"ok": False,
+                        "error": "lead not found or not owned by this "
+                                 "seller"}), 403
     seller = {}
     settings = None
     if seller_id:

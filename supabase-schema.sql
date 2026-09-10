@@ -199,6 +199,13 @@ alter table public.campaigns
 create index if not exists idx_campaigns_seller on public.campaigns(seller_id);
 create index if not exists idx_seller_profile_email on public.seller_profile(email);
 
+-- What this seller PITCHES (not a search term). Sent to the scoring LLM to judge
+-- fit, and used for the outreach angle in drafts. A /campaign run with a blank
+-- `niche` falls back to this, so a seller only describes their offer once here
+-- instead of retyping it on every run. NULL = fall back to the engine default.
+alter table public.seller_profile
+  add column if not exists niche text;
+
 -- =====================================================================
 -- Seller read-scoping: campaign_summary now also scopes to ONE seller.
 -- Adds a second (uuid) overload; keep the single-arg one above for any
