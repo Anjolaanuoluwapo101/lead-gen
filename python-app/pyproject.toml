@@ -1,0 +1,49 @@
+# The AgentCore CodeZip packager finds this file BY NAME and runs:
+#
+#     uv pip install -r <this file> --target <staging> \
+#         --python-version 3.14 --python-platform aarch64-manylinux* \
+#         --only-binary :all:
+#
+# uv reads [project].dependencies out of it, so it must stay a valid PEP 621
+# pyproject.toml — a bare requirements list here fails TOML parsing.
+# (Verified in @aws/agentcore-cdk: lib/packaging/python.js.)
+#
+# Deliberately MINIMAL: every entry is installed into the deployment zip, and
+# --only-binary means each one must ship an aarch64 wheel for the runtime's
+# Python version. Verified resolving for cp314 + aarch64-manylinux_2_28.
+#
+# OMITTED ON PURPOSE — agentcore_app.py does not import app.py, so these belong
+# to the Flask dashboard, which deploys as a separate artifact:
+#     flask, playwright, python-docx, pypdf
+# playwright is only ever imported lazily inside functions, and its browser
+# download has no place in a CodeZip.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "leadgen-agent"
+version = "0.1.0"
+description = "AgentCore Runtime entrypoint for the lead-generation strategist agent"
+requires-python = ">=3.10"
+dependencies = [
+    # Required by the runtime, not by us: AgentCore instruments the entrypoint
+    # with `opentelemetry-instrument` (enableOtel defaults to true), so this
+    # must be present or the deployed runtime fails to start.
+    "aws-opentelemetry-distro",
+    "bedrock-agentcore >= 1.9.1",
+    "botocore[crt] >= 1.35.0",
+    "strands-agents >= 1.15.0",
+    # The engine the agent drives.
+    "requests",
+    "beautifulsoup4",
+    "lxml",
+    "fake_useragent",
+    "curl_cffi",
+    "cloudscraper",
+    "cryptography",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

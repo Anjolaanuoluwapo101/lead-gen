@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Lodestone{% endblock %}
+{# The auth pages drop the drawer and the app bar: there is no workspace to
+   navigate yet, so the card IS the page. #}
+{% block appbar %}{% endblock %}
+{% block body %}
+<div class="center">
+  <div class="brandmark">Lodestone</div>
+  <h1>Sign in</h1>
+  <p class="muted t-b-medium" style="margin-top:4px">
+    Welcome back. Your runs and drafts are where you left them.
+  </p>
+  <div class="card">
+    <form id="form">
+      <div class="tf" style="margin-bottom:16px">
+        <input id="email" type="email" autocomplete="email" placeholder=" " required>
+        <label for="email">Email</label>
+      </div>
+      <div class="tf" style="margin-bottom:20px">
+        <input id="password" type="password" autocomplete="current-password"
+               placeholder=" " required>
+        <label for="password">Password</label>
+      </div>
+      <button id="submit" type="submit" style="width:100%">Sign in</button>
+    </form>
+    <div id="error" class="error" hidden></div>
+  </div>
+  <p class="muted t-b-medium">No account? <a href="/signup">Create one</a>.</p>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+  var A = window.LEADGEN_APP;
+  // Already signed in? Skip the form.
+  if (A.token()) window.location.href = "/";
+
+  A.el("form").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var btn = A.el("submit");
+    btn.disabled = true;
+    A.showError(A.el("error"), "");
+    try {
+      await A.login(A.el("email").value.trim(), A.el("password").value);
+      window.location.href = "/";
+    } catch (err) {
+      A.showError(A.el("error"), err.message);
+      btn.disabled = false;
+    }
+  });
+</script>
+{% endblock %}

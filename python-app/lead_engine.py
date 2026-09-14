@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import config
 import email_scraper
@@ -60,6 +61,11 @@ def _load_dotenv(path):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _load_dotenv(os.path.join(HERE, ".env"))
+# Fallback for the deployed runtime: .env lives OUTSIDE this directory
+# because AgentCore's CodeZip packager copies codeLocation wholesale and
+# does NOT exclude .env (only .git/.venv/__pycache__/node_modules are
+# skipped). Secrets must never be inside the packaged directory.
+_load_dotenv(os.path.join(HERE, os.pardir, ".env"))
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -98,6 +104,28 @@ def _key_part(s):
 ENRICH_MAX_COUNT = 12
 ENRICH_MAX_DEPTH = 1
 ENRICH_ANALYZE_LIMIT = 3
+
+# Businesses enriched + scored at once. Every per-business step is network I/O
+# against a different host (its own site, then the LLM), and workers share
+# nothing mutable — each crawl builds its own Fetcher and scores go through
+# the pooled session — so parallel batches are safe and turn the slowest site
+# from the pace of the whole campaign into the pace of its own batch. Eight,
+# not fifty: LLM rate limits still apply, but a 429 now backs off with
+# Retry-After inside the shared transport instead of failing the business
+# (score failed, kept as enriched). Override with ENRICH_SCORE_WORKERS.
+# STORE writes stay sequential on the caller thread regardless.
+ENRICH_SCORE_WORKERS = 8
+
+
+def _enrich_score_workers():
+    """Live worker count: the constant is the default, the env override wins
+    per call (read here, not at import, so tests and operators can change it
+    without a reimport)."""
+    try:
+        return max(1, int(os.environ.get("ENRICH_SCORE_WORKERS")
+                          or ENRICH_SCORE_WORKERS))
+    except (TypeError, ValueError):
+        return ENRICH_SCORE_WORKERS
 
 # A prior prospect counts as "already handled" (dedup skips re-enriching it) once
 # it reached at least one of these terminal/advanced statuses. A prospect still
@@ -181,21 +209,30 @@ def scrutiny_config(tier=None):
     }
 
 # Hard wall-clock guard per website so one slow/unresponsive site can't stall
-# the whole campaign. Enrichment runs in a thread with a join timeout.
+# the whole campaign. Enrichment runs on a future with a timeout, not a bare
+# thread with a join: on timeout the crawl is ASKED to stop (stop_event winds
+# it down after its current fetch) instead of being abandoned while it keeps
+# fetching and sleeping in the background with no handle. A short grace wait
+# then collects whatever it merged so far, so a slow site still contributes
+# partial data rather than nothing.
 import threading
+from concurrent.futures import TimeoutError as _FuturesTimeout
 
 
 def _enrich_site(website, max_count=None, max_depth=None,
-                 analyze_pages_limit=None, all_domains=False, timeout=90):
-    """Return (emails, intelligence). Runs the crawl in a worker thread and
-    abandons it (returns partial/empty) if it exceeds `timeout` seconds.
+                 analyze_pages_limit=None, all_domains=False, timeout=90,
+                 stop_grace_s=5):
+    """Return (emails, intelligence, errors).
 
     max_count/max_depth/analyze_pages_limit/all_domains are passed straight to
-    email_scraper.scrape_website (same_domain_only is inverted all_domains)."""
+    email_scraper.scrape_website (same_domain_only is inverted all_domains).
+    Past `timeout` seconds the crawl is signalled to stop and whatever it
+    merged so far is returned, plus a timeout note in errors."""
     max_count = max_count if max_count else ENRICH_MAX_COUNT
     max_depth = max_depth if max_depth else ENRICH_MAX_DEPTH
     analyze = analyze_pages_limit if analyze_pages_limit else ENRICH_ANALYZE_LIMIT
     out = {}
+    stop = threading.Event()
 
     def worker():
         out.update(email_scraper.scrape_website(
@@ -204,32 +241,51 @@ def _enrich_site(website, max_count=None, max_depth=None,
             max_depth=int(max_depth),
             analyze_pages_limit=int(analyze),
             same_domain_only=not bool(all_domains),
+            stop_event=stop,
         ))
 
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    t.join(timeout)
+    timed_out = False
+    with ThreadPoolExecutor(max_workers=1,
+                            thread_name_prefix="enrich-site") as ex:
+        fut = ex.submit(worker)
+        try:
+            fut.result(timeout=timeout)
+        except _FuturesTimeout:
+            timed_out = True
+            stop.set()
+            try:
+                fut.result(timeout=stop_grace_s)
+            except _FuturesTimeout:
+                pass
     emails = out.get("emails", {})
     intelligence = out.get("intelligence", {})
-    errors = out.get("errors", [])
-    if t.is_alive():
-        errors.append(f"{website}: enrichment exceeded {timeout}s, skipped")
+    errors = list(out.get("errors", []))
+    if timed_out:
+        errors.append(
+            f"{website}: enrichment exceeded {timeout}s, "
+            f"{'partial results kept' if out else 'skipped'}")
     return emails, intelligence, errors
 
 
 def _enrich_socials(social_links, platforms, timeout=30):
     """Fetch the operator-chosen social profiles for one business's social_links.
-    Runs in a worker thread with a join timeout so a slow walled platform can't
-    stall the whole campaign. Returns {label: payload} (may be {} if nothing
-    selected or everything timed out)."""
+    Runs on a future with a timeout so a slow walled platform can't stall the
+    whole campaign. Returns {label: payload} (may be {} if nothing selected
+    or everything timed out). Unlike the crawl there is no stop hook into the
+    platform fetches, so a timed-out call may finish up to ~30s of bounded
+    internal timeouts in the background; each fetch carries its own 8s cap,
+    so the ghost is short-lived, not a pile-up."""
     out = {}
 
     def worker():
         out.update(social_enrich.enrich(social_links, platforms))
 
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    t.join(timeout)
+    with ThreadPoolExecutor(max_workers=1,
+                            thread_name_prefix="enrich-social") as ex:
+        try:
+            ex.submit(worker).result(timeout=timeout)
+        except _FuturesTimeout:
+            pass
     return out
 
 
@@ -275,7 +331,7 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
                  enrich_max_count=None, enrich_max_depth=None,
                  enrich_analyze_pages_limit=None, all_domains=False,
                  score_model=None, score_extra_hints=None,
-                 scrutiny=None, social_platforms=None):
+                 scrutiny=None, social_platforms=None, progress_cb=None):
     """
     Run one niche campaign end to end. Returns a dict summary; see module
     docstring for the shape. Raises if FIND itself fails (no creds / API error)
@@ -291,6 +347,14 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
     two sellers running the same niche/place get SEPARATE campaigns, so dedup +
     history never leak across tenants. Null is allowed and simply leaves the
     campaign unowned (legacy behaviour) until a seller is resolved.
+
+    progress_cb: optional callable(kind, message) invoked at the four stage
+    boundaries of a run — before FIND ("search"), after FIND ("found"),
+    before the enrich/score pool ("enrich"), after it ("scored"). The agent
+    path passes a writer that appends each to the run trace, so a dashboard
+    watching the run sees the story while it happens instead of silence
+    between turns. Every other caller passes nothing and behaves exactly as
+    before; messages are plain words with real counts, never codes.
     """
     keyword = (keyword or DEFAULTS["keyword"]).strip()
     place = (place or DEFAULTS["place"]).strip()
@@ -409,6 +473,12 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
         results["errors"].append(
             "FIND skipped: no business source configured (check .env creds).")
         return results
+    # Stage 1 of 4: the DataForSEO call below is a 5 to 15 second wait with
+    # nothing written anywhere. Name it before it starts so a watcher sees
+    # the run working, not stuck.
+    if progress_cb:
+        progress_cb("search",
+                    f"Searching for '{keyword}' in {place}")
     rows = source.find_businesses(keyword, place,
                                   location_name=location_name,
                                   location_code=location_code,
@@ -417,6 +487,12 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
     if not rows:
         return results
     results["with_website"] = sum(1 for r in rows if r.get("business_page"))
+    # Stage 2 of 4: FIND landed. Real counts, so the trace says what came
+    # back before the long crawl begins.
+    if progress_cb:
+        progress_cb("found",
+                    f"Found {results['found']} businesses, "
+                    f"{results['with_website']} with websites")
 
     # ---------------- STORE setup / campaign ensure ---------------- #
     store = supabase_store.configured()
@@ -477,10 +553,21 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
     prior_prospects = []
     if store and campaign_id:
         try:
+            # Only HANDLED rows can ever match (the scan below filters on
+            # status), so undiscovered leftovers and duplicate markers are
+            # excluded server-side instead of downloaded and ignored. The
+            # explicit limit + stable order replace the silent PostgREST
+            # default cap: without them a campaign past ~1000 prospects
+            # silently stops deduplicating its oldest rows. 5000 handled
+            # prospects is ~250 runs at 20 a run; past that the honest fix
+            # is server-side dedup (upsert on an identity key), not a
+            # bigger number here.
             prior_prospects = supabase_store.select_rows(
                 "prospects",
                 columns="id,business_name,phone,website,locality,status",
-                filters={"campaign_id": campaign_id})
+                filters={"campaign_id": campaign_id},
+                filters_in={"status": sorted(_HANDLED)},
+                order="created_at.asc", limit=5000)
         except Exception as e:
             results["errors"].append(f"prospect lookup failed: {e}")
             prior_prospects = []
@@ -528,112 +615,222 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
             results["stored"] = False
             results["errors"].append(f"prospects insert failed: {e}")
 
-    # ---------------- ENRICH + SCORE (new prospects, one at a time) -------- #
+    # ---------------- ENRICH + SCORE (new prospects, in parallel) --------- #
+    # This used to walk rows one at a time: crawl a site (up to 90s), score it,
+    # store it, repeat. Ten businesses at ~15s of crawl+score each is minutes,
+    # all spent waiting on network. Workers share nothing (see the constant),
+    # so each business is crawled and judged on its own thread while the STORE
+    # below stays sequential, in row order, on this thread.
+    def _one(work_item):
+        """Crawl + judge ONE business. Never raises: an unexpected failure is
+        an error string on the outcome, because one bad business must not kill
+        the other nineteen. Reads only shared state (cfg, niche, the provider),
+        writes only its own outcome dict."""
+        idx, row = work_item
+        outcome = {"idx": idx, "eligible": False, "has_site": False,
+                   "emails": [], "intelligence": {}, "breakdown": None,
+                   "opportunity": 0, "confidence": 0, "score": 0,
+                   "reasons": [], "gaps": [], "first_line": "",
+                   "qualified": False, "scored_ok": False,
+                   "enriched_n": 0, "scored_n": 0, "qualified_n": 0,
+                   "errors": [], "prospect_status": "discovered"}
+        try:
+            website = row.get("business_page", "")
+            phone = (row.get("telephone") or "").strip()
+            has_site = bool(website)
+            # strict: a lead needs a website. balanced/lenient: a phone number
+            # also makes a business reachable (call/WhatsApp outreach), so it
+            # may be a lead.
+            eligible = has_site or (cfg["accept_phone_only"] and bool(phone))
+            outcome["has_site"] = has_site
+            outcome["eligible"] = eligible
+            emails, intelligence = [], {}
+
+            # ENRICH only when there is a site to crawl (a site-less business
+            # has nothing to crawl — leniency can't invent a website).
+            if has_site:
+                try:
+                    emails_map, intelligence, crawl_errors = _enrich_site(
+                        website,
+                        max_count=enrich_max_count,
+                        max_depth=enrich_max_depth,
+                        analyze_pages_limit=enrich_analyze_pages_limit,
+                        all_domains=all_domains,
+                    )
+                    emails = list(emails_map.keys())
+                    outcome["enriched_n"] = 1
+                    outcome["errors"].extend(crawl_errors)
+                except Exception as e:
+                    outcome["errors"].append(
+                        f"{row.get('business_name')}: {e}")
+
+            # SOCIALS (optional): if the operator picked platforms, deep-fetch
+            # the profiles found on the site. Folds into intelligence so the
+            # scorer reads it and the lead row persists it with no changes.
+            if (has_site and soc_platforms and intelligence.get("social_links")):
+                soc = _enrich_socials(intelligence["social_links"],
+                                      soc_platforms)
+                if soc:
+                    intelligence["socials"] = soc
+
+            # SCORE an eligible business (site present always; phone-only under
+            # balanced/lenient). Deterministic evidence (scoring.compute) is
+            # computed first and handed to the LLM so it INTERPRETS -- never
+            # invents -- the numbers. The tier hint tells the LLM how to treat
+            # sparse data.
+            breakdown = scoring.compute(
+                row, intelligence, emails) if eligible else None
+            opportunity = confidence = score = 0
+            reasons, gaps, first_line = [], [], ""
+            qualified = False
+            scored_ok = False
+            if row.get("business_name") and eligible \
+                    and llm_provider is not None:
+                try:
+                    hints = [str(score_extra_hints)] if score_extra_hints \
+                        else []
+                    if row.get("book_online_url"):
+                        hints.append(
+                            "NOTE: this listing advertises an online booking "
+                            f"URL ({row['book_online_url']}). If the niche is "
+                            "online booking, treat that as a strong reason "
+                            "this business is NOT a prospect.")
+                    hints.append(cfg["hint"])
+                    judged = llm.score_lead(
+                        llm_provider, row, intelligence, niche,
+                        extra_hints="\n\n".join(hints),
+                        breakdown=breakdown)
+                    opportunity = max(0, min(
+                        100, int(judged.get("opportunity_score", 0) or 0)))
+                    # Clamp confidence to the deterministic cap so
+                    # thin/unverified data can't be dressed up as
+                    # high-confidence (anti-pollution).
+                    cap = (breakdown or {}).get("confidence_cap", 100)
+                    raw_conf = max(0, min(
+                        100, int(judged.get("confidence_score", 0) or 0)))
+                    confidence = min(raw_conf, cap)
+                    reasons = judged.get("reasons", []) or []
+                    gaps = judged.get("gaps", []) or []
+                    first_line = judged.get("first_line", "") or ""
+                    score = opportunity
+                    # Thresholds (env-tunable) are authoritative, not the
+                    # LLM's own.
+                    qualified = opportunity >= cfg["threshold"]
+                    require_cf, cf_floor = _confidence_gate()
+                    if require_cf and confidence < cf_floor:
+                        qualified = False
+                    scored_ok = True
+                    outcome["scored_n"] = 1
+                    if qualified:
+                        outcome["qualified_n"] = 1
+                except Exception as e:
+                    outcome["errors"].append(
+                        f"{row.get('business_name')}: score failed: {e}")
+
+            outcome.update(
+                emails=emails, intelligence=intelligence, breakdown=breakdown,
+                opportunity=opportunity, confidence=confidence, score=score,
+                reasons=reasons, gaps=gaps, first_line=first_line,
+                qualified=qualified, scored_ok=scored_ok)
+
+            # Prospect lifecycle: the furthest stage this prospect reached.
+            if not row.get("business_name"):
+                prospect_status = "discovered"
+            elif not eligible:
+                prospect_status = "dismissed"       # nothing reachable
+            elif has_site and not scored_ok:
+                prospect_status = "enriched"        # crawled, couldn't judge
+            elif qualified:
+                prospect_status = "qualified"       # a lead row now links back
+            else:
+                prospect_status = "dismissed"       # scored below threshold
+            outcome["prospect_status"] = prospect_status
+        except Exception as e:
+            # The backstop: even the outcome bookkeeping above must not let one
+            # row kill the batch. The business keeps its discovered status and
+            # the error says what happened.
+            outcome["errors"].append(
+                f"{(row or {}).get('business_name') or idx}: enrich failed: {e}")
+        return outcome
+
+    # map() preserves input order, so outcomes arrive in row order; the merge
+    # below still keys by idx rather than trusting position. Duplicates were
+    # already assessed in a prior run of this campaign — prior result stands,
+    # so they never reach a worker.
+    work = [(idx, row) for idx, row in enumerate(rows) if idx not in duplicates]
+    outcomes = {}
+    # Stage 3 of 4: the pool below is the longest silence in the system
+    # (tens of seconds of crawl plus score). `work` is built, so the count
+    # is real and post dedup. Placed here, not at the section header above,
+    # because only here do we know how many businesses actually go in.
+    if progress_cb and work:
+        progress_cb("enrich",
+                    f"Crawling {len(work)} business "
+                    f"{'site' if len(work) == 1 else 'sites'} "
+                    f"and scoring them")
+    if work:
+        with ThreadPoolExecutor(
+                max_workers=_enrich_score_workers()) as ex:
+            for outcome in ex.map(_one, work):
+                outcomes[outcome["idx"]] = outcome
+    for idx, _ in work:
+        o = outcomes[idx]
+        results["errors"].extend(o["errors"])
+        results["enriched"] += o["enriched_n"]
+        results["scored"] += o["scored_n"]
+        results["qualified"] += o["qualified_n"]
+    # Stage 4 of 4: crawl plus score done. Real counters close the story the
+    # "enrich" event opened.
+    if progress_cb and work:
+        progress_cb("scored",
+                    f"Enriched {results['enriched']}, "
+                    f"scored {results['scored']}, "
+                    f"qualified {results['qualified']}")
+
+    # ---------------- STORE (sequential, in row order) ---------------------- #
+    # The loop below only BUILDS payloads; the batched writes run after it.
+    # lead_rows/lead_names stay parallel (names for per-row fallback errors),
+    # status_buckets groups prospect ids by lifecycle status for one PATCH
+    # per status instead of one per row.
+    lead_rows = []
+    lead_names = []
+    status_buckets = {}
     for idx, row in enumerate(rows):
         if idx in duplicates:
             # Already assessed in a prior run of this campaign; prior result stands.
             continue
-
-        website = row.get("business_page", "")
-        phone = (row.get("telephone") or "").strip()
-        has_site = bool(website)
-        # strict: a lead needs a website. balanced/lenient: a phone number also
-        # makes a business reachable (call/WhatsApp outreach), so it may be a lead.
-        eligible = has_site or (cfg["accept_phone_only"] and bool(phone))
-        emails, intelligence, errs = [], {}, []
-        results["errors"].extend(errs)
-
-        # ENRICH only when there is a site to crawl (a site-less business has
-        # nothing to crawl — leniency can't invent a website).
-        if has_site:
-            try:
-                emails_map, intelligence, crawl_errors = _enrich_site(
-                    website,
-                    max_count=enrich_max_count,
-                    max_depth=enrich_max_depth,
-                    analyze_pages_limit=enrich_analyze_pages_limit,
-                    all_domains=all_domains,
-                )
-                emails = list(emails_map.keys())
-                results["enriched"] += 1
-                results["errors"].extend(crawl_errors)
-            except Exception as e:
-                results["errors"].append(f"{row.get('business_name')}: {e}")
-
-        # SOCIALS (optional): if the operator picked platforms, deep-fetch the
-        # profiles found on the site. Folds into intelligence["socials"] so the
-        # scorer reads it and the lead row persists it with no other changes.
-        if (has_site and soc_platforms and intelligence.get("social_links")):
-            soc = _enrich_socials(intelligence["social_links"], soc_platforms)
-            if soc:
-                intelligence["socials"] = soc
-
-        # SCORE an eligible business (site present always; phone-only under
-        # balanced/lenient). Deterministic evidence (scoring.compute) is computed
-        # first and handed to the LLM so it INTERPRETS -- never invents -- the
-        # numbers. We persist the two scores plus the evidence breakdown, and the
-        # tier hint tells the LLM how to treat sparse data.
-        breakdown = scoring.compute(row, intelligence, emails) if eligible else None
-        opportunity = confidence = score = 0
-        reasons, first_line = [], ""
-        qualified = False
-        scored_ok = False
-        if row.get("business_name") and eligible and llm_provider is not None:
-            try:
-                hints = [str(score_extra_hints)] if score_extra_hints else []
-                if row.get("book_online_url"):
-                    hints.append(
-                        "NOTE: this listing advertises an online booking URL "
-                        f"({row['book_online_url']}). If the niche is online "
-                        "booking, treat that as a strong reason this business is "
-                        "NOT a prospect.")
-                hints.append(cfg["hint"])
-                judged = llm.score_lead(
-                    llm_provider, row, intelligence, niche,
-                    extra_hints="\n\n".join(hints),
-                    breakdown=breakdown)
-                opportunity = max(0, min(
-                    100, int(judged.get("opportunity_score", 0) or 0)))
-                # Clamp confidence to the deterministic cap so thin/unverified
-                # data can't be dressed up as high-confidence (anti-pollution).
-                cap = (breakdown or {}).get("confidence_cap", 100)
-                raw_conf = max(0, min(
-                    100, int(judged.get("confidence_score", 0) or 0)))
-                confidence = min(raw_conf, cap)
-                reasons = judged.get("reasons", []) or []
-                first_line = judged.get("first_line", "") or ""
-                score = opportunity
-                # Thresholds (env-tunable) are authoritative, not the LLM's own.
-                qualified = opportunity >= cfg["threshold"]
-                require_cf, cf_floor = _confidence_gate()
-                if require_cf and confidence < cf_floor:
-                    qualified = False
-                scored_ok = True
-                results["scored"] += 1
-                if qualified:
-                    results["qualified"] += 1
-            except Exception as e:
-                results["errors"].append(
-                    f"{row.get('business_name')}: score failed: {e}")
-
-        # Prospect lifecycle: record the furthest stage this prospect reached.
-        if not row.get("business_name"):
-            prospect_status = "discovered"
-        elif not eligible:
-            prospect_status = "dismissed"          # nothing reachable to pursue
-        elif has_site and not scored_ok:
-            prospect_status = "enriched"           # crawled, but couldn't judge
-        elif qualified:
-            prospect_status = "qualified"          # a lead row now links back
-        else:
-            prospect_status = "dismissed"          # scored below the threshold
+        o = outcomes[idx]
+        eligible = o["eligible"]
+        has_site = o["has_site"]
+        emails = o["emails"]
+        intelligence = o["intelligence"]
+        breakdown = o["breakdown"]
+        opportunity = o["opportunity"]
+        confidence = o["confidence"]
+        score = o["score"]
+        reasons = o["reasons"]
+        gaps = o["gaps"]
+        first_line = o["first_line"]
+        qualified = o["qualified"]
+        scored_ok = o["scored_ok"]
+        prospect_status = o["prospect_status"]
 
         # Eligible businesses become leads (and are persisted). Ineligible ones
         # stay prospects-only (still saved above for the audit trail).
         if eligible:
             lead = _row_prospect(row, campaign_id)
             lead["emails"] = emails
-            lead["emails_extra"] = intelligence.get("phones_found", [])
+            # NOT the phone numbers. This line used to be
+            #     lead["emails_extra"] = intelligence.get("phones_found", [])
+            # which put phones, and the unix-looking junk a phone scraper also
+            # collects, into a column named for email addresses -- and
+            # leads_read.decoded() then JSON-decodes that column AS emails, so
+            # anything iterating it looking for an address got "(512) 661-7896".
+            # Nothing is lost by emptying it: the phones are still in
+            # intelligence["phones_found"], where they are named correctly, and
+            # that whole object is persisted on the row below. An empty list is
+            # the honest value for "no addresses beyond `emails`".
+            lead["emails_extra"] = []
             lead["intelligence"] = intelligence
             lead["digital_presence"] = (breakdown or {}).get("presence_class")
             lead["opportunity_score"] = opportunity
@@ -646,48 +843,93 @@ def run_campaign(keyword=None, place=None, niche=None, max_results=None,
                 "activity_recency", {}).get("last_active")
             lead["score"] = score
             lead["qualified"] = qualified
-            lead["weakness"] = "; ".join(reasons)
+            # `reasons` is the scorer's EVIDENCE for the two scores -- llm.py
+            # asks for "short strings citing concrete evidence and sub-scores",
+            # so for a strong lead it reads as praise. Writing it here meant
+            # `weakness` held "Strong digital presence (presence=100)", which
+            # the drafting prompt then printed under "WHY THEY MAY NEED THIS".
+            # The model resolved that contradiction by inventing a defect, and
+            # a lead scored STRONG_DIGITAL_PRESENCE got an email telling it its
+            # site needed fixing. `gaps` is the scorer's separate answer to
+            # "what do they LACK", and it is the one that belongs in this
+            # column. The evidence is kept, just in the breakdown where it is
+            # named as what it is.
+            lead["weakness"] = "; ".join(gaps)
+            # The evidence is not discarded, only re-homed: this is the only
+            # record of WHY the two scores landed where they did, and dropping
+            # it to stop it being misread would trade one bug for another. It
+            # is the same dict object already on `lead["score_breakdown"]`, and
+            # the row is persisted below, so the mutation reaches the database.
+            if breakdown is not None:
+                breakdown["model_reasons"] = reasons
             lead["first_line"] = first_line
             lead["prospect_id"] = prospect_ids.get(idx)
             results["leads"].append(lead)
 
-            # Persist the lead row + the prospect's final lifecycle status.
+            # Collect the lead row for the bulk insert below (same shape the
+            # old per-row insert sent, including the persisted pid link).
             pid = prospect_ids.get(idx)
             if store and campaign_id and pid:
-                try:
-                    supabase_store.insert_rows("leads", {
-                        "prospect_id": pid,
-                        "campaign_id": campaign_id,
-                        "emails": json.dumps(emails),
-                        "emails_extra": lead["emails_extra"],
-                        "intelligence": json.dumps(intelligence, default=str),
-                        "digital_presence": (breakdown or {}).get("presence_class"),
-                        "opportunity_score": opportunity,
-                        "confidence_score": confidence,
-                        "score_breakdown": json.dumps(breakdown, default=str),
-                        "source_agreement": (breakdown or {}).get(
-                            "source_agreement", {}).get("score"),
-                        "last_active_at": (breakdown or {}).get(
-                            "activity_recency", {}).get("last_active"),
-                        "score": score,
-                        "qualified": qualified,
-                        "weakness": lead["weakness"],
-                        "first_line": first_line,
-                    })
-                except Exception as e:
-                    results["errors"].append(
-                        f"{row.get('business_name')}: lead insert failed: {e}")
+                lead_rows.append({
+                    "prospect_id": pid,
+                    "campaign_id": campaign_id,
+                    "emails": json.dumps(emails),
+                    "emails_extra": lead["emails_extra"],
+                    "intelligence": json.dumps(intelligence, default=str),
+                    "digital_presence": (breakdown or {}).get(
+                        "presence_class"),
+                    "opportunity_score": opportunity,
+                    "confidence_score": confidence,
+                    "score_breakdown": json.dumps(breakdown, default=str),
+                    "source_agreement": (breakdown or {}).get(
+                        "source_agreement", {}).get("score"),
+                    "last_active_at": (breakdown or {}).get(
+                        "activity_recency", {}).get("last_active"),
+                    "score": score,
+                    "qualified": qualified,
+                    "weakness": lead["weakness"],
+                    "first_line": first_line,
+                })
+                lead_names.append(row.get("business_name") or pid)
 
         # Record the reached lifecycle stage on the prospect row itself.
+        # Grouped by status below: one PATCH per status over its ids.
         pid = prospect_ids.get(idx)
         if store and campaign_id and pid:
-            try:
-                supabase_store.update_rows("prospects",
-                                           {"status": prospect_status},
-                                           {"id": pid})
-            except Exception as e:
+            status_buckets.setdefault(prospect_status, []).append(pid)
+
+    # ---------------- STORE writes (batched, in row order) ------------------ #
+    # The loop above is pure bookkeeping now; ALL database writes happen here.
+    # One POST for every lead row and one PATCH per lifecycle status: 20
+    # businesses used to cost up to 40 sequential round trips (8 to 20s of
+    # tail after all parallel work was done) and now cost a handful.
+    if lead_rows:
+        try:
+            supabase_store.insert_rows("leads", lead_rows)
+        except Exception as e:
+            # Bulk failed: fall back to per-row inserts so one bad row cannot
+            # sink the whole batch. Same per-row errors as the old code for
+            # rows that truly fail; a full recovery is one note, not silence
+            # (it explains the latency) and not a failure (nothing was lost).
+            failed = 0
+            for payload, name in zip(lead_rows, lead_names):
+                try:
+                    supabase_store.insert_rows("leads", payload)
+                except Exception as one:
+                    failed += 1
+                    results["errors"].append(
+                        f"{name}: lead insert failed: {one}")
+            if not failed:
                 results["errors"].append(
-                    f"{row.get('business_name')}: status update failed: {e}")
+                    f"bulk lead insert failed but all {len(lead_rows)} rows "
+                    f"saved on retry: {e}")
+    for status, pids in status_buckets.items():
+        try:
+            supabase_store.update_rows("prospects", {"status": status},
+                                       filters_in={"id": pids})
+        except Exception as e:
+            results["errors"].append(
+                f"{len(pids)} prospect(s): status update failed: {e}")
 
     return results
 

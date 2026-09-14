@@ -9,8 +9,7 @@ against a real key before relying on it. Anthropic is only reachable here, not
 Groq, which uses the OpenAICompatible adapter.
 """
 
-import requests
-
+from ._transport import llm_session
 from .base import LLMProvider
 
 
@@ -39,7 +38,7 @@ class Anthropic(LLMProvider):
             "system": system,
             "messages": user_msgs,
         }
-        resp = requests.post(
+        resp = llm_session().post(
             f"{self.base_url}/v1/messages",
             headers={"x-api-key": self.api_key,
                      "anthropic-version": "2023-06-01",

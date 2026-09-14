@@ -22,8 +22,14 @@ import argparse
 import json
 import os
 import sys
+import threading
 
 import requests
+from requests.adapters import HTTPAdapter
+try:
+    from urllib3.util.retry import Retry
+except ImportError:
+    Retry = None
 
 # --------------------------------------------------------------------------- #
 # .env loader (shared convention)
@@ -41,6 +47,11 @@ def _load_dotenv(path):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _load_dotenv(os.path.join(HERE, ".env"))
+# Fallback for the deployed runtime: .env lives OUTSIDE this directory
+# because AgentCore's CodeZip packager copies codeLocation wholesale and
+# does NOT exclude .env (only .git/.venv/__pycache__/node_modules are
+# skipped). Secrets must never be inside the packaged directory.
+_load_dotenv(os.path.join(HERE, os.pardir, ".env"))
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -70,6 +81,35 @@ def _endpoint(table):
     return f"{URL}/rest/v1/{table}"
 
 
+# One shared Session: every Supabase call in the process reuses connections
+# instead of paying a fresh TLS+TCP handshake per row (the STORE phase used
+# to do dozens per campaign). Retries are GET-only and deliberate: a
+# retried read is harmless, but a retried POST/PATCH could insert or mutate
+# twice. Writes fail loudly instead, and the callers decide what that means
+# (lead_engine falls back to per-row inserts; the agent records an error).
+_session_lock = threading.Lock()
+_SESSION = None
+
+
+def _session():
+    global _SESSION
+    if _SESSION is None:
+        with _session_lock:
+            if _SESSION is None:
+                s = requests.Session()
+                if Retry is not None:
+                    retry = Retry(
+                        total=3, backoff_factor=1,
+                        status_forcelist=[429, 500, 502, 503, 504],
+                        allowed_methods=frozenset(["GET"]))
+                    adapter = HTTPAdapter(pool_connections=20,
+                                          pool_maxsize=20, max_retries=retry)
+                    s.mount("https://", adapter)
+                    s.mount("http://", adapter)
+                _SESSION = s
+    return _SESSION
+
+
 def insert_rows(table, rows):
     """
     Insert one or many rows into `table`. `rows` may be a dict (single) or a
@@ -86,7 +126,7 @@ def insert_rows(table, rows):
     if not rows:
         return []
 
-    resp = requests.post(
+    resp = _session().post(
         _endpoint(table),
         headers={**_headers(), "Prefer": "return=representation"},
         json=rows,
@@ -150,7 +190,7 @@ def select_rows(table, columns="*", filters=None, filters_gte=None,
         params["order"] = order
     if limit:
         params["limit"] = int(limit)
-    resp = requests.get(_endpoint(table), headers=_headers(), params=params,
+    resp = _session().get(_endpoint(table), headers=_headers(), params=params,
                         timeout=30)
     if resp.status_code >= 300:
         _raise(table, "select", resp)
@@ -160,16 +200,20 @@ def select_rows(table, columns="*", filters=None, filters_gte=None,
         return []
 
 
-def update_rows(table, updates, filters):
-    """PATCH rows matching `filters`. Returns the updated rows."""
+def update_rows(table, updates, filters=None, filters_in=None):
+    """PATCH rows matching `filters` (eq) and `filters_in` (in). Returns the
+    updated rows. `filters_in` exists for grouped writes: one PATCH per status
+    value over a set of ids, instead of one PATCH per row."""
     if not configured():
         raise RuntimeError(
             "Supabase not configured. Add SUPABASE_URL and SUPABASE_SERVICE_KEY "
             "to .env (see .env.example).")
-    resp = requests.patch(
+    params = _eq_filters(filters)
+    params.update(_in_filters(filters_in))
+    resp = _session().patch(
         _endpoint(table),
         headers={**_headers(), "Prefer": "return=representation"},
-        params=_eq_filters(filters),
+        params=params,
         json=updates, timeout=30,
     )
     if resp.status_code >= 300:
@@ -196,7 +240,7 @@ def upsert_rows(table, rows, on_conflict=None):
     params = {}
     if on_conflict:
         params["on_conflict"] = on_conflict
-    resp = requests.post(
+    resp = _session().post(
         _endpoint(table),
         headers={**_headers(), "Prefer":
                  f"resolution=merge-duplicates,return=representation"},
@@ -218,7 +262,7 @@ def rpc(name, payload=None):
         raise RuntimeError(
             "Supabase not configured. Add SUPABASE_URL and SUPABASE_SERVICE_KEY "
             "to .env (see .env.example).")
-    resp = requests.post(
+    resp = _session().post(
         f"{URL}/rest/v1/rpc/{name}",
         headers=_headers(),
         json=payload or {},

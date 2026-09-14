@@ -1,0 +1,11 @@
+# Machine-generated or local-only: never part of an image.
+**/location_memo.json
+**/err.log
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/tests/
+**/outputs/
+**/.pytest_cache/
+.env
+.last_run_id

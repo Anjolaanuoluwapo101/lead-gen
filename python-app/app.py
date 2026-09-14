@@ -28,6 +28,22 @@ from io import BytesIO
 
 from flask import Flask, request, jsonify
 
+# THIS ORDER IS LOAD-BEARING — do not move this import down.
+#
+# config, llm, lead_engine, supabase_store, dataforseo, groq_ai and at_rest all
+# read os.environ AT IMPORT TIME. Hydrating after them leaves each holding empty
+# credentials, and the failure then surfaces deep inside a request instead of at
+# boot — which is exactly the bug agentcore_app.py documents in the same place.
+#
+# It is here rather than in the __main__ block because that block does not run
+# under gunicorn, which is how the deployed ECS image serves this app.
+#
+# Locally LEADGEN_SECRETS_PATH is unset, hydrate() is a no-op, and the repo-root
+# .env loads exactly as before. Nothing changes for local development.
+import runtime_secrets  # noqa: E402
+
+_BOOT = runtime_secrets.hydrate()
+
 import config  # per-seller provider config resolution
 import llm  # transport-agnostic LLM task layer (score_lead / draft_email)
 import lead_engine  # /campaign orchestrator (find->enrich->score->store)
@@ -36,8 +52,54 @@ import dataforseo  # /location lookup helper (resolves a place -> location_code)
 from providers import (  # provider registry (adapters + name lists)
     get_llm, llm_provider_names, source_provider_names)
 import at_rest as _secrets  # Fernet secrets-at-rest (module named at_rest to avoid shadowing stdlib secrets)
+import leads_read  # shared lead-read helpers, also used by the Strands agent
+import seller_ops  # shared seller/lead writes, also used by the Strands agent
+import auth  # caller identity -> seller_id (Supabase Auth + the n8n service token)
+import draft_compose  # shared draft composition, also used by routes_agent
+import file_store  # where an uploaded file's BYTES live (swappable backend)
+
+# Backwards-compatible aliases: these helpers moved to leads_read.py so the Flask
+# app and the agent share ONE implementation. Call sites below are unchanged.
+# (They must be deleted from this module, not just shadowed -- a later `def` at
+# module level would rebind the name and silently undo the alias.)
+_flatten_leads = leads_read.flatten_leads
+LEAD_COLUMNS = leads_read.LEAD_COLUMNS
+_DRAFT_LEAD_COLUMNS = leads_read.DRAFT_LEAD_COLUMNS
+_decoded = leads_read.decoded
+_seller_owns_campaign = leads_read.owns_campaign
 
 app = Flask(__name__)
+
+# Names only, never values. On a deployed instance this is the one line that
+# says whether credentials arrived before the app is asked to use them.
+#
+# The level is set explicitly because it is otherwise ineffective: with debug
+# off, Flask leaves the app logger at NOTSET, so it inherits the root logger's
+# WARNING and an INFO call is dropped silently. A diagnostic that never prints
+# is worse than no diagnostic -- it reads as "hydration did not run".
+app.logger.setLevel("INFO")
+app.logger.info("secrets: %s",
+                _BOOT.get("skipped") or f"{_BOOT.get('loaded')} from SSM")
+
+
+def _warm_picker_index():
+    """Build the dashboard picker's search index off the request path.
+
+    Cold it costs seconds (parsing the cache file); warm a query answers in
+    under half a second. Warming in a daemon thread at boot means the first
+    keystroke is already warm — otherwise the seller's first type pays the
+    cold cost and the picker feels dead exactly once, on its first impression.
+    Skipped under pytest, where a background parse would only churn CPU behind
+    the suite that never touches the warmed copy.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return
+    import threading
+    threading.Thread(target=dataforseo._picker_index, name="picker-warm",
+                     daemon=True).start()
+
+
+_warm_picker_index()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
@@ -278,80 +340,100 @@ def location_lookup():
     return jsonify({"ok": True, **result})
 
 
+@app.route("/location/search", methods=["POST"])
+def location_search():
+    """
+    Typeahead for the dashboard place picker: a few characters in, up to ten
+    candidate search areas out. Reads the cached world list only, so it costs
+    nothing and needs no DataForSEO credentials. Every returned row is directly
+    selectable: its location_code pins the run's search area.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    q = str(data.get("q") or data.get("place") or "").strip()
+    try:
+        limit = int(data.get("limit") or data.get("top") or 10)
+    except (TypeError, ValueError):
+        limit = 10
+    try:
+        result = dataforseo.search_locations(q, limit=limit)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    return jsonify({"ok": True, **result})
+
+
 # Lifecycle statuses a lead may take (must match leads.status).
 LEAD_STATUSES = {"new", "contacted", "replied", "won", "lost"}
-# Columns n8n needs for outreach + to render the lead. Business contact fields
-# (name/phone/website/…) live on the linked PROSPECT, so we embed them via the
-# FK and lift them to the lead's top level for a flat, n8n-friendly shape.
-LEAD_COLUMNS = ("id,campaign_id,digital_presence,opportunity_score,"
-                "confidence_score,source_agreement,score,qualified,status,"
-                "emails,emails_extra,first_line,weakness,last_active_at,"
-                "created_at,prospect_id(id,business_name,phone,website,category,"
-                "locality,street,region,zipcode)")
-
-
-def _flatten_leads(rows):
-    """Decode jsonb/text fields PostgREST returns as strings, and lift the
-    embedded prospect object's contact fields up to the lead top level (so n8n
-    sees business_name/phone/website without digging into a nested object)."""
-    import json as _json
-    out = []
-    for r in rows:
-        r = dict(r or {})
-        for k in ("emails", "emails_extra"):
-            v = r.get(k)
-            if isinstance(v, str) and v:
-                try:
-                    r[k] = _json.loads(v)
-                except (_json.JSONDecodeError, ValueError):
-                    pass
-        prosp = r.get("prospect_id")
-        if isinstance(prosp, dict):
-            for k in ("business_name", "phone", "website", "category",
-                      "locality", "street", "region", "zipcode"):
-                if k in prosp and r.get(k) in (None, ""):
-                    r[k] = prosp[k]
-            r["prospect_id"] = prosp.get("id")
-        out.append(r)
-    return out
+# LEAD_COLUMNS / _flatten_leads moved to leads_read.py (aliased above) so the
+# Flask app and the Strands agent share one implementation.
 
 
 # --- Seller read-scoping -------------------------------------------------- #
-# Wired NOW so auth can later inject a trusted seller_id with no redesign.
-# A read is never open across sellers: every data-revealing route resolves the
-# caller's seller and refuses rows it doesn't own. Pre-auth, the source is the
-# body seller_id -> DEFAULT_SELLER_ID bridge (mirrors lead_engine's write path);
-# when auth lands, replace _resolve_read_seller with a session-derived id and
-# drop the DEFAULT leniency in _seller_owns_campaign.
+# Wired so auth could inject a trusted seller_id with no redesign — and it now
+# does. A read is never open across sellers: every data-revealing route resolves
+# the caller's seller and refuses rows it doesn't own.
+#
+# This comment used to say "when auth lands, replace _resolve_read_seller with a
+# session-derived id". That is exactly what happened, and it cost one function
+# body: the three call sites below did not change.
+
+@app.errorhandler(auth.AuthError)
+def _auth_error(exc):
+    """A credential problem is not an ownership problem.
+
+    Without this, an expired token would surface as whatever the route's `.get`
+    returned — usually a 400 "no seller", which tells a logged-out user their
+    request was malformed instead of telling them to log in.
+    """
+    return jsonify({"ok": False, "error": exc.message}), exc.status
+
 
 def _resolve_read_seller(data):
-    """Resolve the caller's seller: body seller_id -> DEFAULT_SELLER_ID bridge.
-    Returns None when neither is present (callers return 400)."""
-    sid = str((data or {}).get("seller_id") or "").strip()
-    if not sid:
-        sid = lead_engine.DEFAULT_SELLER_ID or ""
-    return sid.strip() or None
+    """Resolve the caller's seller, or None when nothing identifies them.
+
+    Delegates to auth.resolve_seller, which layers the credentials:
+    bearer token -> that user's seller_profile, X-Service-Token ->
+    DEFAULT_SELLER_ID (n8n), else the body seller_id -> DEFAULT_SELLER_ID bridge
+    this function used to implement itself.
+
+    Raises auth.AuthError on a bad credential; the handler above turns that into
+    a 401/503. Returns None only when there is genuinely no seller to resolve,
+    which callers answer with 400.
+    """
+    return auth.resolve_seller(data, request.headers)
 
 
-def _seller_owns_campaign(seller_id, campaign_id):
-    """True when `campaign_id` belongs to `seller_id`. A legacy NULL-owner
-    campaign counts as owned only by the DEFAULT single-tenant bridge (so a
-    pre-backfill install keeps surfacing its own rows). Unknown campaign ->
-    False."""
-    if not seller_id or not campaign_id:
-        return False
-    try:
-        rows = supabase_store.select_rows(
-            "campaigns", columns="id,seller_id",
-            filters={"id": campaign_id}, limit=1)
-    except Exception:
-        return False
-    if not rows:
-        return False
-    owner = rows[0].get("seller_id")
-    if owner is not None:
-        return str(owner) == seller_id
-    return seller_id == (lead_engine.DEFAULT_SELLER_ID or "").strip()
+def _require_seller(seller_id):
+    """Gate a route whose SUBJECT comes from the URL.
+
+    `/seller/<seller_id>/*` is the one family of routes where the seller is not
+    the caller's to be inferred from the credential — the caller names it
+    outright. So the credential has to be compared against it, and until
+    `auth.authorize_seller` existed nothing did that: any caller could read or
+    overwrite any seller's profile, resume, portfolio and provider keys.
+
+    Raises auth.AuthError(403), which the errorhandler above renders.
+    """
+    return auth.authorize_seller(seller_id, {}, request.headers)
+
+
+def _require_operator():
+    """Refuse a route that only the platform has any business calling.
+
+    `/seller/list` and `/seller/by-email` both take their subject from a query
+    parameter rather than a credential, so there is no id to compare — they are
+    operator tools by construction. A tenant wanting their own row uses
+    `/seller/me`, which cannot be pointed at anyone else.
+
+    Same switch as `authorize_seller`: open while AUTH_REQUIRED is false, closed
+    the moment it is turned on.
+    """
+    if not auth.auth_required() or auth.is_operator(request.headers):
+        return
+    raise auth.AuthError("this endpoint is operator-only", status=403)
+
+
+# _seller_owns_campaign moved to leads_read.owns_campaign (aliased above) so the
+# ownership rule lives in exactly one place.
 
 
 @app.route("/leads", methods=["POST"])
@@ -648,25 +730,43 @@ def email_scrape():
 # through their campaign. These endpoints let the n8n web form create/look up a
 # seller, and an operator later PATCH config (settings jsonb) per tenant.
 # ============================================================================== #
-SELLER_RENDER_MODES = {"html", "js", "auto"}
-_SELLER_PATCHABLE = ("name", "title", "brand", "niche", "phone",
-                     "portfolio_url", "render_mode", "active")
-_SELLER_COLUMNS = ("id,email,name,title,brand,niche,phone,resume_text,"
-                   "portfolio_url,portfolio_text,render_mode,settings,active,"
-                   "created_at,updated_at")
+# The seller/lead RULES now live in seller_ops.py, because the Strands agent
+# needs the same operations and a second copy would drift. These routes are the
+# HTTP skin over it: parse the request, call, translate OpsError to a status.
+#
+# Aliased rather than re-defined so `app._SELLER_COLUMNS` stays one object with
+# the shared module (test_app_rewire.py asserts the identity).
+SELLER_RENDER_MODES = seller_ops.SELLER_RENDER_MODES
+_SELLER_PATCHABLE = seller_ops.SELLER_PATCHABLE
+_SELLER_COLUMNS = seller_ops.SAFE_COLUMNS
+_render_mode = seller_ops.render_mode
+_maybe_bool = seller_ops.maybe_bool
+
+# OpsError.kind -> HTTP status. Every failure the shared layer can raise is
+# listed; an unlisted kind is a bug, and falls through to 502 rather than 200.
+_OPS_STATUS = {"bad_request": 400, "not_found": 404,
+               "unavailable": 503, "upstream": 502}
 
 
-def _render_mode(value, default="auto"):
-    v = str(value or "").strip().lower()
-    return v if v in SELLER_RENDER_MODES else default
+def _ops_response(fn, *args, wrap=None, **kwargs):
+    """Run a seller_ops call and turn its outcome into a Flask response.
 
+    Returning (body, status) centrally is what keeps the routes from inventing
+    their own error shapes — and is why a new failure mode in seller_ops cannot
+    silently start reporting success.
 
-def _maybe_bool(value):
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return None
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
+    `wrap` names the key a bare ROW goes under. These routes have always
+    answered {"ok": true, "seller": {...}}, and the n8n workflows read that
+    shape, so a single-row result must not be flattened into the envelope.
+    """
+    try:
+        result = fn(*args, **kwargs)
+    except seller_ops.OpsError as e:
+        return jsonify({"ok": False, "error": e.message}), \
+            _OPS_STATUS.get(e.kind, 502)
+    if wrap:
+        return jsonify({"ok": True, wrap: result}), 200
+    return jsonify({"ok": True, **result}), 200
 
 
 @app.route("/seller", methods=["POST"])
@@ -678,166 +778,96 @@ def seller_create():
     instead of silently doing nothing); fields left blank are NOT cleared, since
     a form only sends what the operator typed. render_mode defaults to 'auto'
     on create unless the form says otherwise (html | js | auto)."""
+    # Operator-only, like the other two routes that name their subject instead
+    # of being named by a credential. Unguarded this CREATES rows, so anyone
+    # could reserve an email or fill the table. It is also not how a dashboard
+    # user gets a profile — that is `auth.seller_for_user`, which find-or-creates
+    # on the verified email of whoever is signed in — so nothing in the app
+    # loses a path here.
+    _require_operator()
+
     data = request.get_json(force=True) or {}
-    email = str(data.get("email") or "").strip().lower()
-    if not email or "@" not in email:
-        return jsonify({"ok": False, "error": "a valid email is required"}), 400
-    if not supabase_store.configured():
-        return jsonify({"ok": False,
-                        "error": "Supabase not configured"}), 503
-
-    def _text(k):
-        """Coerce any scalar (str/int/float) to a trimmed string, else None.
-        n8n forms may send numbers (e.g. a phone typed as digits), so never
-        call .strip() on the raw value."""
-        v = data.get(k)
-        return None if v is None else (str(v).strip() or None)
-
-    try:
-        existing = supabase_store.select_rows(
-            "seller_profile", columns=_SELLER_COLUMNS,
-            filters={"email": email}, limit=1)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-
-    if existing:
-        # Update only the fields the form actually supplied (non-empty).
-        updates = {}
-        for k in ("name", "title", "brand", "niche", "phone"):
-            v = _text(k)
-            if v:
-                updates[k] = v
-        if "render_mode" in data:
-            updates["render_mode"] = _render_mode(data.get("render_mode"))
-        if not updates:
-            return jsonify({"ok": True, "created": False, "updated": False,
-                            "seller": existing[0]})
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        try:
-            updated = supabase_store.update_rows(
-                "seller_profile", updates, {"id": existing[0]["id"]})
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 502
-        return jsonify({"ok": True, "created": False, "updated": True,
-                        "seller": (updated or existing)[0]})
-
-    row = {
-        "email": email,
-        "name": _text("name"),
-        "title": _text("title"),
-        "brand": _text("brand"),
-        "niche": _text("niche"),
-        "phone": _text("phone"),
-        "render_mode": _render_mode(data.get("render_mode")),
-    }
-    try:
-        created = supabase_store.insert_rows("seller_profile", row)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    return jsonify({"ok": True, "created": True,
-                    "seller": (created or [{}])[0]})
+    return _ops_response(
+        seller_ops.create_or_update_seller,
+        data.get("email"),
+        name=data.get("name"), title=data.get("title"), brand=data.get("brand"),
+        niche=data.get("niche"), phone=data.get("phone"),
+        render_mode_value=data.get("render_mode"),
+        render_mode_given="render_mode" in data)
 
 
 @app.route("/seller/list", methods=["GET"])
 def seller_list():
     """List sellers. ?active=false includes inactive; default lists active only.
     Returns slim rows (identity + render_mode) for dropdowns / the web form."""
+    # Enumerating every tenant is an operator action: this list is the input to
+    # every other id-taking route, so leaving it open undoes their checks.
+    _require_operator()
+
+    active = request.args.get("active")
+    active_only = (active is None
+                   or str(active).strip().lower() in ("1", "true", "yes", ""))
     try:
-        active = request.args.get("active")
-    except Exception:
-        active = None
-    filters = None
-    if active is None or str(active).strip().lower() in ("1", "true", "yes", ""):
-        filters = {"active": "true"}
-    if not supabase_store.configured():
-        return jsonify({"ok": False,
-                        "error": "Supabase not configured"}), 503
-    try:
-        rows = supabase_store.select_rows(
-            "seller_profile",
-            columns=("id,email,name,brand,title,render_mode,active,created_at"),
-            filters=filters, order="created_at.desc")
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
+        rows = seller_ops.list_sellers(active_only=active_only)
+    except seller_ops.OpsError as e:
+        return jsonify({"ok": False, "error": e.message}), \
+            _OPS_STATUS.get(e.kind, 502)
     return jsonify({"ok": True, "count": len(rows), "sellers": rows})
+
+
+@app.route("/seller/me", methods=["GET"])
+def seller_me():
+    """The caller's OWN seller profile.
+
+    This is the multi-tenant-safe lookup, and the reason it exists is that
+    `/seller/by-email` is not: that route takes the identity to fetch from the
+    REQUEST (`?email=`), so it cannot tell a seller reading their own profile
+    from anyone else reading it — and it returns the full safe row, resume and
+    portfolio text included.
+
+    Here the id comes from the caller's credential instead, so "read someone
+    else's profile" is not an expressible request. The dashboard uses this.
+
+    `get_seller`, not `find_seller_by_email`: there is no lookup to scope,
+    because the id was never the caller's to choose.
+    """
+    seller_id = _resolve_read_seller({})
+    if not seller_id:
+        return jsonify({"ok": False,
+                        "error": "no seller could be resolved for this "
+                                 "request"}), 400
+    return _ops_response(seller_ops.get_seller, seller_id, wrap="seller")
 
 
 @app.route("/seller/by-email", methods=["GET"])
 def seller_by_email():
     """Look a seller up by email (n8n convenience: confirm a seller_id from the
     form's email before wiring a campaign to it)."""
+    # Resolving an arbitrary email to a seller id is the lookup step of every
+    # other seller route, so it has to be at least as restricted as they are.
+    _require_operator()
+
     email = str(request.args.get("email") or "").strip().lower()
     if not email:
-        return jsonify({"ok": False, "error": "email query param is required"}), 400
-    if not supabase_store.configured():
         return jsonify({"ok": False,
-                        "error": "Supabase not configured"}), 503
-    try:
-        rows = supabase_store.select_rows(
-            "seller_profile", columns=_SELLER_COLUMNS,
-            filters={"email": email}, limit=1)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    if not rows:
-        return jsonify({"ok": False, "error": "seller not found"}), 404
-    return jsonify({"ok": True, "seller": rows[0]})
+                        "error": "email query param is required"}), 400
+    return _ops_response(seller_ops.find_seller_by_email, email, wrap="seller")
 
 
 @app.route("/seller/<seller_id>", methods=["GET"])
 def seller_get(seller_id):
-    if not supabase_store.configured():
-        return jsonify({"ok": False,
-                        "error": "Supabase not configured"}), 503
-    try:
-        rows = supabase_store.select_rows(
-            "seller_profile", columns=_SELLER_COLUMNS,
-            filters={"id": seller_id}, limit=1)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    if not rows:
-        return jsonify({"ok": False, "error": "seller not found"}), 404
-    return jsonify({"ok": True, "seller": rows[0]})
+    _require_seller(seller_id)
+    return _ops_response(seller_ops.get_seller, seller_id, wrap="seller")
 
 
 @app.route("/seller/<seller_id>", methods=["PATCH"])
 def seller_update(seller_id):
     """Update profile fields on a seller. Only the listed scalar columns are
     accepted (config/settings + resume/portfolio get their own routes)."""
+    _require_seller(seller_id)
     data = request.get_json(force=True) or {}
-    updates = {}
-    for k in _SELLER_PATCHABLE:
-        if k not in data:
-            continue
-        v = data[k]
-        if k == "render_mode":
-            v = _render_mode(v)
-            if v not in SELLER_RENDER_MODES:
-                return jsonify({"ok": False, "error":
-                                "render_mode must be html|js|auto"}), 400
-        elif k == "active":
-            v = _maybe_bool(v)
-            if v is None:
-                continue
-        elif v is None:
-            continue
-        else:
-            v = (str(v).strip() or None)
-        updates[k] = v
-    if not updates:
-        return jsonify({"ok": False, "error": "no valid fields to update"}), 400
-
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    if not supabase_store.configured():
-        return jsonify({"ok": False,
-                        "error": "Supabase not configured"}), 503
-    try:
-        updated = supabase_store.update_rows(
-            "seller_profile", updates, {"id": seller_id})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    if not updated:
-        return jsonify({"ok": False, "error": "seller not found"}), 404
-    return jsonify({"ok": True, "seller": updated[0]})
+    return _ops_response(seller_ops.update_seller, seller_id, data,
+                         wrap="seller")
 
 
 def _extract_resume_text(filename, content_b64):
@@ -873,9 +903,23 @@ def _extract_resume_text(filename, content_b64):
 
 @app.route("/seller/<seller_id>/resume", methods=["POST"])
 def seller_resume_upload(seller_id):
-    """Store a seller's resume. Body: {filename, content_base64}. The base64 is
-    the raw file bytes; only the EXTRACTED text is kept in the DB (never the
-    file), per the agreed design. .docx and .pdf are supported."""
+    """Store a seller's resume. Body: {filename, content_base64}.
+
+    Two things are stored now, and they are different things:
+
+      * `resume_text` — the EXTRACTED text, in the row. It is what the drafting
+        model reads, and it is why this route exists.
+      * the FILE's bytes — via file_store, so the send path can attach the
+        actual document. Extracted text is a summary of a resume; it is not
+        the resume, and you cannot attach it to an email.
+
+    The bytes are stored AFTER the text is extracted, and a storage failure does
+    not fail the request. The text is the part drafting needs, and losing an
+    upload over an unavailable bucket would break the flow that already worked.
+
+    .docx and .pdf are supported.
+    """
+    _require_seller(seller_id)
     data = request.get_json(force=True) or {}
     filename = str(data.get("filename") or "").strip()
     content_b64 = data.get("content_base64")
@@ -886,7 +930,27 @@ def seller_resume_upload(seller_id):
         return jsonify({"ok": False,
                         "error": "Supabase not configured"}), 503
     try:
-        text = _extract_resume_text(filename, content_b64)
+        raw = base64.b64decode(content_b64, validate=True)
+    except Exception:
+        return jsonify({"ok": False,
+                        "error": "content_base64 is not valid base64"}), 400
+    return _persist_resume(seller_id, filename, raw)
+
+
+def _persist_resume(seller_id, filename, raw):
+    """Extract the text, keep the file, update the row. Both routes call this.
+
+    There are two upload entry points — JSON with base64 (the dashboard) and
+    multipart (?email=, for n8n's Form node) — and they used to each carry their
+    own copy of this. That is why the n8n path would have gone on discarding the
+    file bytes after the send feature started keeping them: the same rule
+    written twice, and only one copy updated.
+
+    Returns a (jsonify, status) pair like any route.
+    """
+    try:
+        text = _extract_resume_text(
+            filename, base64.b64encode(raw).decode("ascii"))
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
@@ -897,6 +961,23 @@ def seller_resume_upload(seller_id):
 
     updates = {"resume_text": text, "resume_filename": filename,
                "updated_at": datetime.now(timezone.utc).isoformat()}
+
+    stored_key = None
+    storage_error = None
+    try:
+        content_type = _resume_content_type(filename)
+        stored_key = file_store.put(
+            file_store.resume_key(seller_id, filename), raw, content_type)
+        if stored_key:
+            updates["resume_key"] = stored_key
+            updates["resume_content_type"] = content_type
+            updates["resume_size_bytes"] = len(raw)
+    except Exception as e:
+        # Recorded, not raised: the text is saved, so the seller's drafting
+        # still works, and the response says plainly that the attachment half
+        # did not. Failing the whole upload would break what already worked.
+        storage_error = f"{type(e).__name__}: {str(e)[:200]}"
+
     try:
         updated = supabase_store.update_rows(
             "seller_profile", updates, {"id": seller_id})
@@ -906,7 +987,23 @@ def seller_resume_upload(seller_id):
         return jsonify({"ok": False, "error": "seller not found"}), 404
     return jsonify({"ok": True, "chars": len(text),
                     "resume_filename": filename,
+                    "file_stored": bool(stored_key),
+                    "storage_error": storage_error,
                     "seller": updated[0]})
+
+
+def _resume_content_type(filename):
+    """The type to hand the storage layer and, later, the mail client.
+
+    Fixed by extension rather than sniffed: browsers send
+    `application/octet-stream` for .docx often enough that trusting the
+    client's value would attach the resume as an unopenable blob.
+    """
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return {"pdf": "application/pdf",
+            "docx": ("application/vnd.openxmlformats-officedocument"
+                     ".wordprocessingml.document")}.get(
+                        ext, "application/octet-stream")
 
 
 @app.route("/seller/resume", methods=["POST"])
@@ -916,6 +1013,10 @@ def seller_resume_by_email():
     no intermediate lookup), then behaves exactly like POST /seller/<id>/resume.
     The lone uploaded file is taken regardless of the multipart field name n8n
     used, since that name is not guaranteed across n8n versions."""
+    # Same shape as /seller/by-email: the subject is a query param, so there is
+    # no id to compare against a credential and only the platform may call it.
+    _require_operator()
+
     email = str(request.args.get("email") or "").strip().lower()
     if not email:
         return jsonify({"ok": False, "error": "email query param is required"}), 400
@@ -945,28 +1046,7 @@ def seller_resume_by_email():
     if not filename or not raw:
         return jsonify({"ok": False,
                         "error": "empty file or missing filename"}), 400
-    content_b64 = base64.b64encode(raw).decode("ascii")
-
-    try:
-        text = _extract_resume_text(filename, content_b64)
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"ok": False,
-                        "error": f"resume could not be parsed: {e}"}), 400
-
-    updates = {"resume_text": text, "resume_filename": filename,
-               "updated_at": datetime.now(timezone.utc).isoformat()}
-    try:
-        updated = supabase_store.update_rows(
-            "seller_profile", updates, {"id": seller_id})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    if not updated:
-        return jsonify({"ok": False, "error": "seller not found"}), 404
-    return jsonify({"ok": True, "chars": len(text),
-                    "resume_filename": filename,
-                    "seller": updated[0]})
+    return _persist_resume(seller_id, filename, raw)
 
 
 @app.route("/seller/<seller_id>/portfolio", methods=["POST"])
@@ -977,6 +1057,7 @@ def seller_portfolio_fetch(seller_id):
     (normally the seller's creation form already fixed render_mode)."""
     import portfolio  # lazy: pulls the hardened fetch stack only when used
 
+    _require_seller(seller_id)
     data = request.get_json(force=True) or {}
     url = str(data.get("url") or "").strip()
     if not url:
@@ -1026,19 +1107,7 @@ def seller_portfolio_fetch(seller_id):
     })
 
 
-_DRAFT_LEAD_COLUMNS = (
-    "id,campaign_id,prospect_id(id,business_name,phone,website,category,"
-    "locality,street,region,zipcode),weakness,first_line,intelligence,emails,"
-    "digital_presence,opportunity_score,qualified,created_at")
-
-
-def _decoded(obj):
-    if isinstance(obj, str):
-        try:
-            return json.loads(obj)
-        except (json.JSONDecodeError, ValueError):
-            return {}
-    return obj or {}
+# _DRAFT_LEAD_COLUMNS / _decoded moved to leads_read.py (aliased above).
 
 
 def _resolve_draft_seller(data, campaign_seller_id):
@@ -1061,40 +1130,23 @@ def draft():
     seller's stored name/title/brand/resume/portfolio, and hands them to the LLM.
     Output {subject, email_body, angle} is returned, NOT persisted."""
     data = request.get_json(force=True) or {}
-    lead_id = str(data.get("lead_id") or "").strip()
-    if not lead_id:
-        return jsonify({"ok": False, "error": "lead_id is required"}), 400
     if not supabase_store.configured():
         return jsonify({"ok": False,
                         "error": "Supabase not configured"}), 503
 
-    # 1. The lead + its embedded business (prospect) fields.
-    try:
-        leads = supabase_store.select_rows(
-            "leads", columns=_DRAFT_LEAD_COLUMNS,
-            filters={"id": lead_id}, limit=1)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 502
-    if not leads:
-        return jsonify({"ok": False, "error": "lead not found"}), 404
-    lead = leads[0]
+    lead_id = str(data.get("lead_id") or "").strip()
+    if not lead_id:
+        return jsonify({"ok": False, "error": "lead_id is required"}), 400
 
-    # 2. The campaign (for its niche + owning seller).
+    # The lead has to be read here, not inside compose_draft, because its
+    # campaign is what the ownership gate below is checked against — and the
+    # order of the 404 and the 403 is observable by n8n. A missing lead must
+    # stay "lead not found" (404), not become "not owned" (403).
+    lead = leads_read.read_lead(lead_id)
+    if not lead:
+        return jsonify({"ok": False, "error": "lead not found"}), 404
     campaign_id = lead.get("campaign_id")
-    niche = None
-    campaign_seller_id = None
-    if campaign_id:
-        try:
-            camps = supabase_store.select_rows(
-                "campaigns", columns="id,keyword,niche_rules,seller_id",
-                filters={"id": campaign_id}, limit=1)
-        except Exception as e:
-            camps = []
-            # non-fatal: continue without campaign niche
-        if camps:
-            rules = _decoded(camps[0].get("niche_rules"))
-            niche = rules.get("niche") or camps[0].get("keyword")
-            campaign_seller_id = camps[0].get("seller_id")
+    _niche, campaign_seller_id = leads_read.read_campaign_niche(campaign_id)
 
     # 3. Resolve the seller: fetch their identity + resume/portfolio (the draft
     # context) AND their settings (provider config). The settings jsonb (which
@@ -1111,67 +1163,20 @@ def draft():
         return jsonify({"ok": False,
                         "error": "lead not found or not owned by this "
                                  "seller"}), 403
-    seller = {}
-    settings = None
-    if seller_id:
-        try:
-            sellers = supabase_store.select_rows(
-                "seller_profile",
-                columns=("id,email,name,title,brand,phone,resume_text,"
-                         "portfolio_text,render_mode,settings"),
-                filters={"id": seller_id}, limit=1)
-        except Exception as e:
-            sellers = []
-        if sellers:
-            seller = {k: sellers[0].get(k) for k in
-                      ("name", "title", "brand", "phone",
-                       "resume_text", "portfolio_text")}
-            settings = _decoded(sellers[0].get("settings"))
 
-    # 4. Flatten the business fields to a clean prospect snapshot.
-    prospect = lead.get("prospect_id")
-    if isinstance(prospect, dict):
-        business = {k: prospect.get(k) for k in
-                    ("business_name", "category", "phone", "website",
-                     "locality", "street", "region", "zipcode")}
-        business = {k: v for k, v in business.items() if v}
-    else:
-        business = {"business_name": "this business"}
-    for k in ("business_name", "category", "website", "locality"):
-        if not business.get(k):
-            business[k] = lead.get(k)
-
-    intelligence = _decoded(lead.get("intelligence"))
-    weakness = str(lead.get("weakness") or "").strip()
-    first_line = str(lead.get("first_line") or "").strip()
-    if not weakness and (business.get("category") or niche):
-        weakness = (f"Category: {business.get('category') or '?'}. "
-                    f"We're selling: {niche or '?'}.")
-
-    # Resolve the seller's LLM provider (their stored provider/model/key, else
-    # env-master). model: an explicit score_model overrides; else the seller's.
-    provider = get_llm(config.llm_cfg(settings, model=data.get("score_model")))
+    # The composition (prospect snapshot, niche, provider, prompt) lives in
+    # draft_compose so this route and the dashboard's persisting POST /drafts
+    # cannot drift apart. This route's shape is unchanged: same keys, same
+    # statuses, nothing persisted.
     try:
-        draft_out = llm.draft_email(
-            provider,
-            business=business, intelligence=intelligence, niche=niche,
-            weakness=weakness, first_line=first_line,
-            seller=seller,
+        payload = draft_compose.compose_draft(
+            lead_id, seller_id,
             temperature=float(data.get("temperature") or 0.7),
-        )
-    except Exception as e:
-        return jsonify({"ok": False,
-                        "error": f"draft failed: {e}"}), 502
+            score_model=data.get("score_model"))
+    except seller_ops.OpsError as e:
+        return jsonify({"ok": False, "error": e.message}),             _OPS_STATUS.get(e.kind, 502)
 
-    return jsonify({
-        "ok": True,
-        "lead_id": lead_id,
-        "seller_id": seller_id,
-        "seller_name": (seller.get("name") or seller.get("brand")) or None,
-        "campaign_id": campaign_id,
-        "niche": niche,
-        **draft_out,
-    })
+    return jsonify({"ok": True, **payload})
 
 
 def _mask_settings(settings):
@@ -1181,6 +1186,7 @@ def _mask_settings(settings):
     settings = _decoded(settings)
     llm = settings.get("llm") or {}
     finder = settings.get("finder") or {}
+    smtp = settings.get("smtp") or {}
     masked = {
         "llm": {
             "provider": llm.get("provider"),
@@ -1192,6 +1198,18 @@ def _mask_settings(settings):
             "provider": finder.get("provider"),
             "login": "********" if finder.get("login_enc") else None,
             "password": "********" if finder.get("password_enc") else None,
+        },
+        # host/user/from_email are configuration, not secrets: showing them is
+        # what lets a seller see which account their mail leaves from, and the
+        # From-vs-account mismatch is the failure this block exists to prevent.
+        # Only the password is masked.
+        "smtp": {
+            "host": smtp.get("host"),
+            "port": smtp.get("port"),
+            "user": smtp.get("user"),
+            "from_email": smtp.get("from_email"),
+            "from_name": smtp.get("from_name"),
+            "password": "********" if smtp.get("password_enc") else None,
         },
     }
     return masked
@@ -1213,6 +1231,10 @@ def _get_seller_settings(seller_id):
 def seller_config_get(seller_id):
     """Return the seller's provider settings MASKED (no secrets, only whether
     each is set). Use this to render the config form in n8n/the UI."""
+    # Masked or not, this is a provider-credential surface — it reports which
+    # keys exist and (via PATCH) rewrites them. It is the single highest-value
+    # target in the API, and it was the most open route in the file.
+    _require_seller(seller_id)
     if not supabase_store.configured():
         return jsonify({"ok": False,
                         "error": "Supabase not configured"}), 503
@@ -1229,10 +1251,21 @@ def seller_config_get(seller_id):
 def seller_config_patch(seller_id):
     """Update a seller's provider settings. Body mirrors the settings shape:
       { "llm":    {"provider","model","base_url","api_key"},
-        "finder": {"provider","login","password"} }
+        "finder": {"provider","login","password"},
+        "smtp":   {"host","port","user","from_email","from_name","password"} }
     Secret values (api_key/login/password) are ENCRYPTED before storage; sending
     null/"" for one clears it (falls back to the env master key). Provider names
-    are validated against the registry."""
+    are validated against the registry.
+
+    An `smtp` block is how a seller sends through THEIR OWN account instead of
+    the platform's. Note that `from_email` is only honoured when `host` and
+    `user` are also set — see `config.smtp_cfg`, which explains why and reports
+    the ignored value rather than dropping it silently."""
+    # The GET reports which keys exist; this one REWRITES them. Unguarded, it
+    # was remote credential overwrite: point a seller's llm.base_url at a host
+    # you control and every draft they generate is exfiltrated, including the
+    # prospect data in the prompt.
+    _require_seller(seller_id)
     data = request.get_json(force=True) or {}
     if not supabase_store.configured():
         return jsonify({"ok": False,
@@ -1246,8 +1279,10 @@ def seller_config_patch(seller_id):
 
     body_llm = data.get("llm")
     body_finder = data.get("finder")
+    body_smtp = data.get("smtp")
     llm_s = dict(settings.get("llm") or {})
     finder_s = dict(settings.get("finder") or {})
+    smtp_s = dict(settings.get("smtp") or {})
 
     def _store_secret(cur, enc_field, value):
         # value is plaintext from the caller; encrypt (or clear) before storing.
@@ -1289,11 +1324,38 @@ def seller_config_patch(seller_id):
             if "password" in body_finder:
                 _store_secret(finder_s, "password_enc",
                               body_finder.get("password"))
+
+        if isinstance(body_smtp, dict):
+            for k in ("host", "user", "from_email", "from_name"):
+                if k in body_smtp:
+                    smtp_s[k] = (str(body_smtp.get(k) or "").strip() or None)
+            if "port" in body_smtp:
+                raw = str(body_smtp.get("port") or "").strip()
+                if not raw:
+                    smtp_s["port"] = None
+                else:
+                    # Validated here rather than left to fail at send time. A
+                    # stored port of "587 " or "five-eighty-seven" produces an
+                    # SMTP connection error that names the socket, not the
+                    # setting that is wrong.
+                    try:
+                        port = int(raw)
+                    except (TypeError, ValueError):
+                        port = -1
+                    if not (1 <= port <= 65535):
+                        return jsonify({
+                            "ok": False,
+                            "error": f"smtp.port must be a port number between "
+                                     f"1 and 65535, got {raw!r}"}), 400
+                    smtp_s["port"] = port
+            if "password" in body_smtp:
+                _store_secret(smtp_s, "password_enc", body_smtp.get("password"))
     except RuntimeError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
     settings["llm"] = llm_s
     settings["finder"] = finder_s
+    settings["smtp"] = smtp_s
     try:
         updated = supabase_store.update_rows(
             "seller_profile",
@@ -1305,6 +1367,19 @@ def seller_config_patch(seller_id):
     if not updated:
         return jsonify({"ok": False, "error": "seller not found"}), 404
     return jsonify({"ok": True, "config": _mask_settings(settings)})
+
+
+# The agent/draft/dashboard surface. Registered here rather than declared above
+# so it lives in its own module: /runs and /drafts serve the dashboard, while
+# everything above serves the n8n pipeline, whose routes and response shapes are
+# frozen. Kept as its own import at the bottom because routes_agent reads the
+# shared modules (draft_compose, seller_ops, leads_read) — it does not import
+# app, so there is no cycle.
+import routes_agent  # noqa: E402
+import routes_ui  # noqa: E402
+
+routes_agent.register_agent_routes(app)
+routes_ui.register_ui_routes(app)
 
 
 if __name__ == "__main__":

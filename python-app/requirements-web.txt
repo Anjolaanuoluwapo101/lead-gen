@@ -1,0 +1,20 @@
+# Web image (Dockerfile.web) install list: requirements.txt MINUS playwright.
+#
+# playwright is the only entry that is both heavy (tens of MB of wheel) and
+# unusable here: headless_fetch imports it lazily and only renders when
+# ENRICH_JS_RENDER is on, which additionally needs a chromium the image
+# deliberately omits (Dockerfile.web). Without the browser the import site
+# fails loudly either way, so shipping the wheel buys nothing.
+#
+# python-docx/pypdf STAY: the live POST /seller/<id>/resume route parses
+# resumes with them. requirements.txt itself is untouched (local dev + n8n).
+flask
+requests
+beautifulsoup4
+lxml
+fake_useragent
+curl_cffi
+cloudscraper
+python-docx
+pypdf
+cryptography

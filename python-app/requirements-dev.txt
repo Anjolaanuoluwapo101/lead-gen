@@ -1,0 +1,2 @@
+# Dev/test only — never installed into the AgentCore zip.
+pytest>=8

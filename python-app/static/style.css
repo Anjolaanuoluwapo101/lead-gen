@@ -1,0 +1,864 @@
+/* ===========================================================================
+   Lodestone — Material Design 3, seeded from #FF9900.
+
+   No framework, no build step, no CDN. One stylesheet, because a CDN link
+   would mean the demo stops working the moment the venue wifi does.
+
+   HOW THE COLOURS WORK
+   --------------------
+   On a real Android device these tokens are generated from the user's
+   wallpaper. A web app can't do that, so it picks ONE seed and derives the
+   rest: M3 maps a seed to four tonal palettes (primary, secondary, neutral,
+   neutral-variant) at fixed lightness tones, then assigns roles from those
+   tones. Primary is always tone 40, its container tone 90, on-container tone
+   10. That is why an orange seed gives a RUST primary and not #FF9900 — tone
+   40 is a mid-dark colour by definition, and every Material app seeded orange
+   looks like this.
+
+   If you want the action buttons to be actual AWS orange, change --primary to
+   #AA6400 (tone 50). Contrast against on-primary drops from 6.6:1 to 4.65:1 —
+   still WCAG AA, less margin.
+
+   WHAT MAKES IT READ AS MATERIAL
+   ------------------------------
+   Not the icons. It is: tonal surface containers carrying hierarchy instead of
+   borders, 28px pill buttons, the ripple, filled text fields with a floating
+   label, and Roboto's type scale. Roboto is not on Windows, so this falls back
+   to Segoe UI — close, but not the same.
+   =========================================================================== */
+
+:root {
+  /* --- primary: derived from seed #FF9900 (AWS orange) --- */
+  --primary: #884F00;
+  --on-primary: #FFFCEF;
+  --primary-container: #FFDBBA;
+  --on-primary-container: #2B1600;
+  /* --- secondary: same hue, desaturated --- */
+  --secondary: #6B5B4D;
+  --on-secondary: #FFFFFC;
+  --secondary-container: #F1DFCE;
+  --on-secondary-container: #25190C;
+  /* --- tertiary --- */
+  --tertiary: #673B00;
+  --tertiary-container: #FFB56A;
+  --on-tertiary-container: #2B1600;
+  /* --- error: M3 baseline, unchanged --- */
+  --error: #B3261E;
+  --on-error: #FFFFFF;
+  --error-container: #F9DEDC;
+  --on-error-container: #410E0B;
+  /* --- surfaces: warm neutrals, also derived from the seed --- */
+  --background: #FFFBF8;
+  --on-background: #1E1B19;
+  --surface: #FFFBF8;
+  --on-surface: #1E1B19;
+  --surface-variant: #EAE1D8;
+  --on-surface-variant: #4D453E;
+  --outline: #7E756D;
+  --outline-variant: #CEC5BC;
+  --sc-lowest: #FFFFFE;
+  --sc-low: #F7F3EF;
+  --sc: #F1EDEA;
+  --sc-high: #EBE7E4;
+  --sc-highest: #E5E2DE;
+  /* --- inverse --- */
+  --inv-surface: #33302D;
+  --inv-on-surface: #F4F0ED;
+  --inv-primary: #FFB56A;
+
+  /* --- success: M3's baseline has no success role, so real M3 apps add one.
+         A green tonal pair in the same spirit. --- */
+  --success: #146C2E;
+  --success-container: #C4EED0;
+  --on-success-container: #072711;
+  --warning: #7A5900;
+  --warning-container: #FFDF9E;
+  --on-warning-container: #261A00;
+
+  /* --- shape --- */
+  --xs: 4px; --sm: 8px; --md: 12px; --lg: 16px; --xl: 28px;
+
+  /* --- elevation --- */
+  --e1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
+  --e2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
+  --e3: 0 1px 3px rgba(0,0,0,.30), 0 4px 8px 3px rgba(0,0,0,.15);
+
+  --sans: Roboto, "Segoe UI Variable Text", "Segoe UI", system-ui,
+          -apple-system, sans-serif;
+  --mono: "Cascadia Mono", ui-monospace, Consolas, "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--background); color: var(--on-surface);
+  font: 400 14px/20px var(--sans); letter-spacing: .25px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* =========================================================================
+   TYPE SCALE — M3's, verbatim
+   ========================================================================= */
+h1 { font: 400 28px/36px var(--sans); letter-spacing: 0; margin: 0 0 4px; }
+h2 { font: 500 16px/24px var(--sans); letter-spacing: .15px; margin: 32px 0 12px; }
+h3 { font: 500 14px/20px var(--sans); letter-spacing: .1px; margin: 0 0 4px; }
+p  { margin: 0 0 12px; }
+
+.t-h-medium { font: 400 28px/36px var(--sans); }
+.t-t-large  { font: 400 22px/28px var(--sans); }
+.t-t-medium { font: 500 16px/24px var(--sans); letter-spacing: .15px; }
+.t-t-small  { font: 500 14px/20px var(--sans); letter-spacing: .1px; }
+.t-b-large  { font: 400 16px/24px var(--sans); letter-spacing: .5px; }
+.t-b-medium { font: 400 14px/20px var(--sans); letter-spacing: .25px; }
+.t-b-small  { font: 400 12px/16px var(--sans); letter-spacing: .4px; }
+.t-l-medium { font: 500 12px/16px var(--sans); letter-spacing: .5px; }
+.t-l-small  { font: 500 11px/16px var(--sans); letter-spacing: .5px; }
+
+.muted { color: var(--on-surface-variant); }
+.small { font: 400 12px/16px var(--sans); letter-spacing: .4px; }
+a { color: var(--primary); }
+
+/* =========================================================================
+   RIPPLE — pure CSS, on every interactive surface.
+
+   `.q` is excluded: it is a <button>, and the ripple's ::after would fight the
+   tooltip for the same pseudo-element.
+   ========================================================================= */
+.rip, button:not(.q), .nav-item, .ditem {
+  position: relative; overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+.rip::after, button:not(.q)::after, .nav-item::after, .ditem::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  background: radial-gradient(circle at center, currentColor 14%, transparent 14.6%);
+  transform: scale(0); opacity: 0; pointer-events: none;
+}
+.rip:active::after, button:not(.q):active::after, .nav-item:active::after,
+.ditem:active::after {
+  transform: scale(2.8); opacity: .13;
+  transition: transform .38s cubic-bezier(.2,0,0,1), opacity .38s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rip::after, button:not(.q)::after, .nav-item::after, .ditem::after {
+    display: none;
+  }
+}
+
+/* =========================================================================
+   BUTTONS — bare `button` is a filled button, so existing markup just works
+   ========================================================================= */
+button, .btn {
+  font: 500 14px/20px var(--sans); letter-spacing: .1px;
+  height: 40px; padding: 0 24px; border: none; border-radius: 20px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  cursor: pointer; white-space: nowrap;
+  background: var(--primary); color: var(--on-primary);
+  box-shadow: none;
+}
+button:hover, .btn:hover { box-shadow: inset 0 0 0 999px rgba(255,255,255,.08); }
+button:disabled, .btn:disabled { opacity: .38; cursor: not-allowed; box-shadow: none; }
+button[hidden] { display: none; }
+
+button.secondary, .btn.tonal {
+  background: var(--secondary-container); color: var(--on-secondary-container);
+}
+button.secondary:hover { box-shadow: inset 0 0 0 999px rgba(37,25,12,.08); }
+button.danger, .btn.danger {
+  background: transparent; color: var(--error);
+  box-shadow: inset 0 0 0 1px var(--outline);
+}
+button.danger:hover { box-shadow: inset 0 0 0 999px rgba(179,38,30,.08); }
+.btn.outlined {
+  background: transparent; color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--outline);
+}
+/* A text button — the "review" link inside a table row. */
+button.link, .btn.text {
+  background: transparent; color: var(--primary); padding: 0 12px;
+  font-weight: 500; height: 32px;
+}
+button.link:hover { box-shadow: inset 0 0 0 999px rgba(136,79,0,.08); }
+
+/* Icon button: 40px, fully round. */
+.icon-btn {
+  width: 40px; height: 40px; padding: 0; border-radius: 50%;
+  background: transparent; color: var(--on-surface-variant);
+}
+.icon-btn svg { width: 24px; height: 24px; }
+
+/* =========================================================================
+   SURFACES — hierarchy from tonal containers, not borders
+   ========================================================================= */
+.card {
+  background: var(--sc-low); border-radius: var(--md);
+  padding: 16px; margin-bottom: 12px;
+}
+/* A table card scrolls sideways rather than clipping. `overflow: hidden` kept
+   the rounded corners tidy but cut off the right hand columns with nothing to
+   say they were there, and the dashboard's tables are wide enough to overflow
+   on a laptop. The card is still the thing that bounds the width, so the page
+   itself never widens. */
+.card.flush { padding: 0; overflow: auto; }
+.card.outlined { background: var(--surface);
+                 box-shadow: inset 0 0 0 1px var(--outline-variant); }
+
+/* =========================================================================
+   STATUS — every state the app can write, plus a neutral default
+   ========================================================================= */
+.pill, .chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 12px; border-radius: var(--sm);
+  font: 500 14px/20px var(--sans); letter-spacing: .1px;
+  background: var(--sc-highest); color: var(--on-surface-variant);
+  border: none; white-space: nowrap;
+}
+.pill:empty { display: none; }
+
+.pill.running, .pill.queued {
+  background: var(--secondary-container); color: var(--on-secondary-container);
+}
+.pill.succeeded, .pill.approved, .pill.sent {
+  background: var(--success-container); color: var(--on-success-container);
+}
+.pill.stopped, .pill.sending {
+  background: var(--warning-container); color: var(--on-warning-container);
+}
+.pill.failed, .pill.rejected, .pill.cancelled {
+  background: var(--error-container); color: var(--on-error-container);
+}
+.pill.draft { background: var(--sc-highest); color: var(--on-surface-variant); }
+
+/* A running run gets a live dot: "running" above a frozen table is the one
+   status a reader cannot verify at a glance. */
+.pill.running::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%;
+  background: currentColor; flex: none;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+@media (prefers-reduced-motion: reduce) { .pill.running::before { animation: none } }
+
+/* =========================================================================
+   PROGRESS — 4px linear indicator
+   ========================================================================= */
+.bar {
+  height: 4px; background: var(--primary-container);
+  border-radius: 2px; overflow: hidden; margin: 0 0 16px;
+}
+.bar > i {
+  display: block; height: 100%; background: var(--primary);
+  border-radius: 2px; transition: width .4s cubic-bezier(.2,0,0,1);
+}
+
+/* =========================================================================
+   TEXT FIELDS
+
+   Two forms. A bare input is a filled field with its label above. Wrap the
+   input and its label in `.tf`, and give the input `placeholder=" "`, to get
+   the floating label — the one that actually reads as Android.
+   ========================================================================= */
+label {
+  display: block; font: 500 12px/16px var(--sans); letter-spacing: .5px;
+  color: var(--on-surface-variant); margin-bottom: 6px;
+}
+input, textarea, select {
+  width: 100%; font: 400 16px/24px var(--sans); letter-spacing: .5px;
+  color: var(--on-surface); background: var(--sc-highest);
+  border: none; border-bottom: 1px solid var(--on-surface-variant);
+  border-radius: var(--xs) var(--xs) 0 0; padding: 14px 16px;
+  outline: none;
+}
+textarea { line-height: 24px; min-height: 120px; resize: vertical; }
+input:focus, textarea:focus, select:focus {
+  border-bottom: 2px solid var(--primary); padding-bottom: 13px;
+}
+input::placeholder, textarea::placeholder { color: var(--outline); }
+input:disabled, textarea:disabled { opacity: .5; }
+
+select {
+  appearance: none; -webkit-appearance: none; padding-right: 44px;
+  background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%234D453E'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  background-size: 24px 24px;
+}
+
+/* The floating-label field. Structure matters: input first, then label. */
+.tf { position: relative; }
+.tf input, .tf textarea { padding: 24px 16px 8px; }
+.tf input:focus, .tf textarea:focus { padding-bottom: 7px; }
+.tf label {
+  position: absolute; left: 16px; top: 15px; margin: 0; pointer-events: none;
+  font: 400 16px/24px var(--sans); letter-spacing: .5px;
+  color: var(--on-surface-variant);
+  transition: top .15s cubic-bezier(.2,0,0,1), font-size .15s;
+}
+.tf input:focus + label, .tf textarea:focus + label,
+.tf input:not(:placeholder-shown) + label,
+.tf textarea:not(:placeholder-shown) + label {
+  top: 6px; font-size: 12px; line-height: 16px; letter-spacing: .4px;
+}
+.tf input:focus + label, .tf textarea:focus + label { color: var(--primary); }
+.tf textarea { min-height: 240px; }
+
+/* Supporting text — where the plain-English meaning of a field goes. */
+.support {
+  font: 400 12px/16px var(--sans); letter-spacing: .4px;
+  color: var(--on-surface-variant); padding: 4px 0 0;
+}
+
+/* =========================================================================
+   LISTS — M3 list items: leading avatar, headline, supporting text, trailing
+   ========================================================================= */
+.list { padding: 8px 0; }
+.li { display: flex; gap: 16px; padding: 12px 16px; align-items: flex-start; }
+.li .lead {
+  width: 40px; height: 40px; border-radius: 50%; flex: none;
+  display: grid; place-items: center;
+  background: var(--secondary-container); color: var(--on-secondary-container);
+}
+.li .lead svg { width: 22px; height: 22px; }
+.li .lead.ok { background: var(--success-container); color: var(--on-success-container); }
+.li .lead.no { background: var(--error-container); color: var(--on-error-container); }
+.li .lead.neutral { background: var(--sc-highest); color: var(--on-surface-variant); }
+.li .body { flex: 1; min-width: 0; }
+.li .trail {
+  font: 500 12px/16px var(--sans); letter-spacing: .5px;
+  color: var(--on-surface-variant); white-space: nowrap;
+}
+.divider { height: 1px; background: var(--outline-variant); margin-left: 72px; }
+.divider.full { margin-left: 0; }
+
+/* =========================================================================
+   TABLES — kept, but on tonal surfaces with no outer border
+   ========================================================================= */
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; font: 500 12px/16px var(--sans); letter-spacing: .5px;
+  color: var(--on-surface-variant); padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--outline-variant); white-space: nowrap;
+}
+/* `break-word` and not `anywhere`: an email address or a URL has no spaces, so
+   without this it sets the column's minimum width and shoves the table past the
+   card. `anywhere` would break ordinary words mid syllable, which reads worse
+   than a slightly wider cell. Headers stay on one line — they are short, and a
+   wrapped header in a table this dense is harder to scan. */
+td { padding: 12px 16px; border-bottom: 1px solid var(--outline-variant);
+     overflow-wrap: break-word; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--sc); }
+td .pill { height: 26px; padding: 0 10px; font-size: 12px; }
+
+/* =========================================================================
+   NOTICES
+   ========================================================================= */
+.error, .note {
+  border-radius: var(--sm); padding: 12px 16px; margin: 12px 0;
+  font: 400 14px/20px var(--sans); letter-spacing: .25px;
+}
+.error { background: var(--error-container); color: var(--on-error-container); }
+.note  { background: var(--secondary-container); color: var(--on-secondary-container); }
+.error[hidden], .note[hidden] { display: none; }
+
+/* =========================================================================
+   STATS — the run page writes <span class="stat"><b>v</b><span>k</span></span>
+   ========================================================================= */
+#stats {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px;
+  background: var(--outline-variant); border-radius: var(--sm); overflow: hidden;
+}
+.stat { background: var(--sc-lowest); padding: 12px 14px; display: block; }
+.stat b { display: block; font: 400 24px/32px var(--sans); letter-spacing: 0; }
+.stat > span {
+  display: block; font: 500 11px/16px var(--sans); letter-spacing: .5px;
+  color: var(--on-surface-variant); margin-top: 4px;
+}
+@media (max-width: 900px) { #stats { grid-template-columns: repeat(3, 1fr); } }
+
+/* =========================================================================
+   SHELL — navigation drawer + content
+   ========================================================================= */
+.shell { display: flex; min-height: 100%; }
+
+.drawer {
+  width: 280px; flex: none; background: var(--sc-low);
+  border-radius: 0 var(--lg) var(--lg) 0;
+  padding: 12px; display: flex; flex-direction: column;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+}
+.drawer .appname {
+  font: 400 22px/28px var(--sans); padding: 16px 16px 20px;
+  color: var(--on-surface); text-decoration: none; display: block;
+}
+.drawer .sec {
+  font: 500 14px/20px var(--sans); letter-spacing: .1px;
+  color: var(--on-surface-variant); padding: 16px 16px 8px;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 12px;
+  height: 56px; padding: 0 16px; border-radius: var(--xl);
+  border: none; background: none; cursor: pointer; width: 100%;
+  text-align: left; text-decoration: none; box-shadow: none;
+  font: 500 14px/20px var(--sans); letter-spacing: .1px;
+  color: var(--on-surface-variant);
+}
+.nav-item:hover { background: var(--sc-high); box-shadow: none; }
+.nav-item.on {
+  background: var(--secondary-container); color: var(--on-secondary-container);
+}
+.nav-item svg { width: 24px; height: 24px; flex: none; }
+.nav-item .n { margin-left: auto; font: 500 12px/16px var(--sans); }
+.nav-item.danger { color: var(--error); }
+/* Sign out and the account line, pinned to the bottom of the drawer. The
+   wrapper carries the `auto` margin; see the note in base.html for why it is
+   not on each child. */
+.drawer-foot { margin-top: auto; display: flex; flex-direction: column; }
+.nav-foot {
+  padding: 16px; font: 400 12px/16px var(--sans);
+  letter-spacing: .4px; color: var(--on-surface-variant);
+  border-top: 1px solid var(--outline-variant);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.appbar {
+  min-height: 64px; display: flex; align-items: center; gap: 8px;
+  padding: 8px 24px; position: sticky; top: 0; z-index: 20;
+  background: var(--background);
+}
+.appbar .title { font: 400 22px/28px var(--sans); }
+.spacer { flex: 1; }
+
+.page { padding: 0 24px 96px; max-width: 1120px; width: 100%; }
+
+/* Section header: a label and a rule, so a long scroll reads as chapters. */
+.sect { display: flex; align-items: center; gap: 12px; margin: 32px 0 12px; }
+.sect .rule { flex: 1; height: 1px; background: var(--outline-variant); }
+
+/* =========================================================================
+   LAYOUT HELPERS the templates already use
+   ========================================================================= */
+.row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+
+/* Radio group. The control itself is left native — it keeps the platform focus
+   ring and keyboard behaviour, which a hand-built radio button usually loses.
+   Only the spacing is set. `accent-color` is the seed, so it matches the rest. */
+.choices { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 0 0 16px; }
+.choices label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.choices input { width: 18px; height: 18px; accent-color: var(--primary);
+                 margin: 0; cursor: pointer; }
+
+/* The three parts of a goal, under the goal field. A grid rather than prose so
+   the pattern is readable at a glance: the numbered lead in its own column,
+   the explanation beside it, one row each. */
+.anatomy { display: grid; gap: 8px; margin: 0 0 16px; }
+.anatomy .part {
+  display: grid; grid-template-columns: 152px 1fr; gap: 12px;
+  font: 400 14px/20px var(--sans); align-items: baseline;
+}
+.anatomy .k { font-weight: 500; color: var(--on-surface); }
+.anatomy .v { color: var(--on-surface-variant); }
+.anatomy em { color: var(--on-surface-variant); opacity: .85; }
+
+/* Example goals. `.chip` already carries the M3 shape; only the wrapping is
+   overridden, because these are full sentences and the shared pill style is
+   single line. */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.chips .chip {
+  height: auto; padding: 8px 14px; white-space: normal; text-align: left;
+  line-height: 18px; cursor: pointer;
+}
+.chips .chip:hover { background: var(--sc-high); }
+
+/* Label/value pairs, used to read a looked-up business back to the person who
+   asked for it. A grid rather than a table because the values are free text,
+   not columns to compare. */
+.facts { display: grid; grid-template-columns: max-content 1fr;
+         gap: 6px 20px; margin: 0; font: 400 14px/20px var(--sans); }
+.facts dt { color: var(--on-surface-variant); }
+.facts dd { margin: 0; overflow-wrap: break-word; }
+.center { max-width: 420px; margin: 8vh auto 0; }
+.center h1, .center > p { text-align: center; }
+.center .card { margin-top: 20px; }
+
+/* The wordmark on the auth pages, where there is no drawer to carry it. */
+.brandmark {
+  text-align: center; font: 400 22px/28px var(--sans); letter-spacing: .5px;
+  color: var(--primary); margin-bottom: 20px;
+}
+/* A rule under it, echoing the app's own section headers. */
+.brandmark::after {
+  content: ""; display: block; width: 40px; height: 2px;
+  background: var(--primary-container); margin: 12px auto 0; border-radius: 1px;
+}
+
+/* =========================================================================
+   MASTER / DETAIL — the draft list beside its editor
+   ========================================================================= */
+.split { display: grid; grid-template-columns: 300px 1fr; gap: 12px; align-items: start; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+.dlist { padding: 8px; }
+.ditem {
+  display: block; width: 100%; text-align: left; border: none; cursor: pointer;
+  padding: 12px 16px; border-radius: var(--md); background: none;
+  font: inherit; color: inherit; height: auto; white-space: normal;
+}
+.ditem:hover { box-shadow: inset 0 0 0 999px rgba(0,0,0,.04); }
+.ditem.on { background: var(--secondary-container); color: var(--on-secondary-container); }
+.ditem .to {
+  font: 400 12px/16px var(--sans); letter-spacing: .4px;
+  color: var(--on-surface-variant);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ditem.on .to { color: var(--on-secondary-container); }
+.ditem .sj { font: 500 14px/20px var(--sans); letter-spacing: .1px; margin: 2px 0 6px; }
+
+/* =========================================================================
+   TOOLTIP — plain tooltip per spec: inverse surface, 4px radius
+   ========================================================================= */
+.q {
+  position: relative; display: inline-grid; place-items: center;
+  width: 16px; height: 16px; min-height: 16px; margin-left: 4px; padding: 0;
+  border-radius: 50%; border: none; background: transparent; box-shadow: none;
+  color: var(--on-surface-variant); cursor: help; vertical-align: -3px;
+  flex: none; overflow: visible;
+}
+.q:hover { box-shadow: none; background: transparent; }
+.q svg { width: 15px; height: 15px; }
+.q::after {
+  content: attr(data-tip);
+  position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  width: 216px; padding: 8px 12px; text-align: left;
+  font: 400 12px/16px var(--sans); letter-spacing: .4px;
+  color: var(--inv-on-surface); background: var(--inv-surface);
+  border-radius: var(--xs); opacity: 0; pointer-events: none;
+  transition: opacity .1s .15s; z-index: 60;
+  white-space: normal; text-transform: none;
+}
+.q:hover::after, .q:focus-visible::after { opacity: 1; }
+.q.left::after { left: 0; transform: none; }
+.q.right::after { left: auto; right: 0; transform: none; }
+
+/* =========================================================================
+   BLOCKS OF RAW DATA
+   ========================================================================= */
+pre {
+  font: 400 12px/18px var(--mono); background: var(--sc-highest);
+  border-radius: var(--sm); padding: 16px; overflow-x: auto;
+  margin: 12px 0 0; color: var(--on-surface-variant);
+}
+details summary {
+  font: 500 14px/20px var(--sans); letter-spacing: .1px;
+  color: var(--primary); cursor: pointer; padding: 8px 0; list-style: none;
+}
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "\25B8  "; }
+details[open] summary::before { content: "\25BE  "; }
+
+/* =========================================================================
+   COMBOBOX — the search area picker on the dashboard.
+
+   A plain input with a dropdown list under it. The list floats above the
+   content that follows, so opening it never shoves the form down.
+   ========================================================================= */
+.combo-wrap { position: relative; }
+.combo-list {
+  position: absolute; left: 0; right: 0; top: 100%; z-index: 40;
+  background: var(--sc-lowest); border-radius: var(--sm); box-shadow: var(--e2);
+  max-height: 280px; overflow-y: auto; padding: 8px; margin-top: 4px;
+}
+.combo-list[hidden] { display: none; }
+.combo-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  width: 100%; height: auto; padding: 10px 12px; border-radius: var(--sm);
+  background: transparent; color: var(--on-surface); text-align: left;
+  white-space: normal; box-shadow: none;
+}
+.combo-item:hover { background: var(--sc-high); box-shadow: none; }
+.combo-name { font: 500 14px/20px var(--sans); letter-spacing: .1px; }
+.combo-meta {
+  font: 400 12px/16px var(--sans); letter-spacing: .4px;
+  color: var(--on-surface-variant);
+}
+.combo-empty {
+  padding: 10px 12px; color: var(--on-surface-variant);
+  font: 400 14px/20px var(--sans); letter-spacing: .25px;
+}
+
+/* =========================================================================
+   PRESENCE — the app should feel warm and decisive, not beige.
+
+   Everything here is tone on tone from the same seed: orange containers for
+   the thing that starts work, tinted rows for data, a gradient bar for
+   progress. No new hues, no images, no CDN — flat was the complaint, and
+   flat is a colour problem, not a layout one.
+   ========================================================================= */
+
+/* Warmth from the top: the page fades from a light apricot into the
+   background within the first screen, so the appbar and the first card sit
+   on colour while long tables below stay on plain surface for readability. */
+body {
+  background: linear-gradient(180deg, #FFF3E2 0, var(--background) 340px);
+}
+
+/* The appbar pins to the viewport top, so it gets a floor: a hairline under
+   it keeps the title readable over scrolled content without a shadow that
+   would fight the cards'. */
+.appbar { border-bottom: 1px solid var(--outline-variant); }
+
+/* The drawer carries the brand: rust wordmark, and the active destination
+   keeps its tonal pill. */
+.drawer .appname { color: var(--primary); font-weight: 500; }
+
+/* Section headers read as chapters: rust label, and a rule that starts in
+   primary container and dissolves, instead of a flat grey line. */
+.sect .t-t-medium { color: var(--primary); }
+.sect .rule {
+  height: 2px; border-radius: 1px;
+  background: linear-gradient(90deg, var(--primary-container),
+                              rgba(255,219,186,0));
+}
+
+/* HERO — the card that starts a run. Full seed gradient, dark text on it,
+   white-ish fields, and a near-black Start button for the one action the
+   whole page exists for. Applied to the dashboard form card only: everything
+   downstream of it (tables, drafts, events) stays on quiet surfaces so the
+   hero is the single loudest thing on the page. */
+.card.hero {
+  background: linear-gradient(135deg, var(--primary-container) 0,
+                              var(--tertiary-container) 100%);
+  color: var(--on-primary-container);
+  box-shadow: var(--e2);
+}
+.card.hero .muted { color: var(--on-primary-container); opacity: .78; }
+.card.hero .support { color: var(--on-primary-container); opacity: .85; }
+.card.hero .anatomy .k { color: var(--on-primary-container); }
+.card.hero .anatomy .v,
+.card.hero .anatomy em { color: var(--on-primary-container); opacity: .85; }
+.card.hero .tf input,
+.card.hero input,
+.card.hero select { background: rgba(255,255,255,.68); }
+.card.hero input:focus,
+.card.hero select:focus { border-bottom-color: var(--primary); }
+.card.hero .tf label { color: var(--on-primary-container); opacity: .8; }
+.card.hero .q { color: var(--on-primary-container); }
+.card.hero .chip {
+  background: rgba(255,255,255,.72); color: var(--on-primary-container);
+  box-shadow: var(--e1);
+}
+.card.hero .chip:hover { background: #FFFDF8; box-shadow: var(--e2); }
+.card.hero #go {
+  background: var(--inv-surface); color: var(--inv-on-surface);
+  box-shadow: var(--e2);
+}
+.card.hero #go:hover {
+  box-shadow: var(--e3), inset 0 0 0 999px rgba(255,255,255,.08);
+}
+.card.hero #go:active { transform: translateY(1px); }
+.card.hero .combo-list { box-shadow: var(--e3); }
+
+/* TABLES — tinted header, decisive hover, strong first column.
+   The hover used the same grey as the card, which is why rows felt dead:
+   the eye needs the hovered row to warm up, not disappear. */
+thead th { background: var(--sc-high); }
+thead th:first-child { border-radius: var(--sm) 0 0 0; }
+thead th:last-child { border-radius: 0 var(--sm) 0 0; }
+tbody tr:hover { background: var(--secondary-container); }
+td:first-child { font-weight: 500; }
+
+/* STATS — the numbers are the point of the tiles, so they carry the brand
+   colour instead of inheriting body text. */
+.stat b { color: var(--primary); }
+
+/* PROGRESS — the fill runs brand into amber, so movement reads even at a
+   glance across the room (demo conditions). */
+.bar {
+  height: 6px;
+  background: var(--primary-container);
+}
+.bar > i {
+  background: linear-gradient(90deg, var(--primary), #E8930C);
+}
+
+/* PILLS — a hair more weight so statuses scan as labels, not body text. */
+td .pill, .pill { font-weight: 500; }
+
+/* DRAFT picks — the selected draft warms up instead of just darkening. */
+.ditem.on {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+.ditem.on .to { color: var(--on-primary-container); opacity: .8; }
+
+/* FOCUS — keyboard users get the same signal mouse users get from hover:
+   a brand coloured underline on fields, and a visible ring on buttons. */
+button:focus-visible, .nav-item:focus-visible, .ditem:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--primary); outline-offset: 2px;
+}
+
+/* =========================================================================
+   MATURITY — laptop-first product scale.
+
+   The complaint was "boring and tiny on laptops": a 14px base, an 1120px
+   page, 16px cards and 12px gaps on a 1440px screen read as a prototype,
+   not a product. This section scales the whole system up one notch —
+   type, width, padding, rhythm — without touching any token, hue, id,
+   class name or line of copy. Everything below is pure restyle: the same
+   Material 3 system, set larger and given room to breathe.
+   ========================================================================= */
+
+/* SCALE — one notch up from the base: 15px body, wider page, deeper cards.
+   16px body would push the dense tables (six columns plus statuses) into
+   horizontal scroll on 1280px laptops, so 15px is the ceiling that still
+   fits the data. */
+body {
+  font-size: 15px; line-height: 24px;
+}
+.page { padding: 0 32px 120px; max-width: 1320px; }
+.row { gap: 16px; }
+
+/* APPBAR — taller, airier, with a 3px brand bar above it (seed gradient,
+   primary into amber) so the product opens with a signature, not a line. */
+.appbar {
+  min-height: 76px; padding: 12px 32px 12px;
+  border-bottom: none;
+  box-shadow: inset 0 -1px 0 var(--outline-variant);
+}
+.appbar::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, var(--primary), var(--tertiary-container));
+}
+.appbar .title { font-size: 24px; line-height: 32px; font-weight: 500; }
+
+/* DRAWER — roomier rail with a wordmark that carries weight. */
+.drawer { width: 296px; padding: 16px 16px 20px; }
+.drawer .appname {
+  font-size: 26px; line-height: 32px; font-weight: 500;
+  padding: 20px 16px 24px; letter-spacing: .25px;
+}
+.drawer .sec {
+  font-size: 12px; line-height: 16px; letter-spacing: .8px;
+  text-transform: uppercase; padding: 20px 16px 8px;
+}
+
+/* SECTIONS — chapters, not labels: larger rust title, more air above. */
+.sect { margin: 44px 0 16px; gap: 16px; }
+.sect .t-t-medium { font-size: 18px; line-height: 24px; }
+
+/* CARDS — deeper padding, calmer separation. Tables keep flush. */
+.card { padding: 24px; margin-bottom: 20px; border-radius: var(--lg); }
+.card.flush { border-radius: var(--lg); }
+
+/* HERO — the start-run card gets the largest surface on the page. */
+.card.hero { padding: 28px; border-radius: 20px; }
+.card.hero #go { height: 48px; padding: 0 36px; font-size: 15px; }
+
+/* BUTTONS — taller targets with a touch more presence. */
+button, .btn { height: 44px; padding: 0 28px; font-size: 15px; }
+
+/* FIELDS — roomier inputs to match the buttons beside them. */
+input, textarea, select { padding: 16px; }
+input:focus, textarea:focus, select:focus { padding-bottom: 15px; }
+.tf input, .tf textarea { padding: 26px 16px 10px; }
+.tf input:focus, .tf textarea:focus { padding-bottom: 9px; }
+
+/* TABLES — airier rows, tabular numerals so counts and scores align down
+   a column instead of jittering. Headers gain a notch of size. */
+th {
+  font-size: 13px; line-height: 20px; padding: 14px 20px 10px;
+}
+td { padding: 14px 20px; font-variant-numeric: tabular-nums; }
+td .pill { height: 28px; padding: 0 12px; font-size: 13px; }
+
+/* STATS — the run's headline numbers, set like headlines. */
+.stat { padding: 18px 20px; }
+.stat b { font-size: 32px; line-height: 40px; font-weight: 500; }
+.stat > span { font-size: 12px; margin-top: 6px; }
+
+/* PROGRESS — thicker bar to match the larger stats it sits above. */
+.bar { height: 8px; border-radius: 4px; margin: 0 0 20px; }
+.bar > i { border-radius: 4px; }
+
+/* LISTS — the trace and draft rows breathe a little more. */
+.li { padding: 14px 20px; }
+.li .trail { font-size: 13px; }
+
+/* PILLS — a notch taller so statuses hold their own in roomier rows. */
+.pill, .chip { height: 34px; padding: 0 14px; }
+
+/* DRAFTS — wider list column, roomier picks, airier editor. */
+.split { grid-template-columns: 340px 1fr; gap: 16px; }
+.dlist { padding: 10px; }
+.ditem { padding: 14px 18px; }
+.ditem .sj { font-size: 15px; line-height: 22px; }
+
+/* EMPTY STATES — a table that found nothing should say so like it means
+   it: centered, padded, unmistakable, instead of a small grey line lost in
+   a wide card. */
+#prospects-body td.muted, #drafts-body td.muted,
+#runs-body td.muted {
+  padding: 36px 20px; text-align: center; font-size: 15px;
+}
+
+/* NOTICES — errors and notes scale with the body text. */
+.error, .note { padding: 14px 20px; font-size: 15px; margin: 16px 0; }
+
+/* COMBOBOX — the picker list matches the roomier fields. */
+.combo-list { max-height: 320px; }
+.combo-item { padding: 12px 14px; }
+.combo-name { font-size: 15px; }
+
+/* LOGIN — the sign-in card gets the full treatment: deep padding and real
+   elevation, so the first screen of the product already looks expensive. */
+.center { max-width: 480px; }
+.center .card { padding: 36px 32px; box-shadow: var(--e2); }
+.brandmark { font-size: 28px; line-height: 36px; }
+
+/* SCROLLBARS — thin warm thumbs on overflowing tables and lists, instead of
+   the platform default grey. Decorative only; Firefox falls back silently. */
+.card.flush::-webkit-scrollbar, .combo-list::-webkit-scrollbar {
+  height: 10px; width: 10px;
+}
+.card.flush::-webkit-scrollbar-thumb, .combo-list::-webkit-scrollbar-thumb {
+  background: var(--sc-highest); border-radius: 5px;
+}
+
+/* SELECTION — dragging across copy paints the seed container, not blue. */
+::selection { background: var(--primary-container); }
+
+/* MID SCREENS — between the phone rail (760px) and full laptop width, pull
+   the scale back halfway so 1024px tablets do not scroll sideways. */
+@media (max-width: 1100px) {
+  .page { padding: 0 20px 96px; }
+  .appbar { padding: 8px 20px; }
+  #stats { grid-template-columns: repeat(3, 1fr); }
+  .split { grid-template-columns: 300px 1fr; }
+}
+
+/* =========================================================================
+   SMALL SCREENS — the drawer folds into a rail along the top
+   ========================================================================= */
+@media (max-width: 760px) {
+  .shell { flex-direction: column; }
+  .drawer {
+    width: auto; height: auto; position: static; border-radius: 0;
+    flex-direction: row; overflow-x: auto; gap: 4px; padding: 8px;
+    border-bottom: 1px solid var(--outline-variant);
+  }
+  .drawer .appname, .drawer .sec, .nav-foot { display: none; }
+  .nav-item { width: auto; padding: 0 14px; height: 44px; }
+  /* `display: contents` dissolves the footer wrapper so Sign out becomes a
+     rail item like the others. Left as a flex column it would be a single
+     item holding a button, which the row layout would then size oddly. */
+  .drawer-foot { margin-top: 0; display: contents; }
+  .page { padding: 0 12px 64px; }
+  .appbar { padding: 8px 12px; }
+  .row { flex-direction: column; align-items: stretch; }
+  .row button { width: 100%; }
+  /* The two column goal breakdown has no room for two columns here, and a
+     152px gutter would leave the explanations a few words wide. */
+  .anatomy .part { grid-template-columns: 1fr; gap: 2px; }
+  .chips .chip { width: 100%; }
+}

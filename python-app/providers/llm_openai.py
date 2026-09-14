@@ -10,8 +10,7 @@ not code. A per-seller key that is NOT on an OpenAI-compatible provider (e.g.
 native Anthropic) should use the AnthropicProvider adapter instead.
 """
 
-import requests
-
+from ._transport import llm_session
 from .base import LLMProvider
 
 
@@ -34,7 +33,7 @@ class OpenAICompatible(LLMProvider):
                    "messages": messages}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        resp = requests.post(
+        resp = llm_session().post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"},

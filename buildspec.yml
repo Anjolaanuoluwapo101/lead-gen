@@ -1,0 +1,35 @@
+version: 0.2
+
+# Builds Dockerfile.web and pushes it to ECR.
+#
+# WHY THIS EXISTS RATHER THAN A docker build
+#
+# The development machine has no Docker installed, and App Runner needs an
+# image. Rather than making a local install a prerequisite for deploying, the
+# build happens here — CodeBuild's standard image already has a working docker
+# daemon, so the same Dockerfile produces the same image with nothing installed
+# locally.
+#
+# ECR_REPO_URI is supplied by the CodeBuild project's environment, not baked in
+# here: the account id would otherwise be committed.
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to ECR"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPO_URI"
+      # Tag with the commit so an image is traceable back to source, and keep
+      # :latest because that is what App Runner is pointed at.
+      - IMAGE_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}"
+      - echo "Building tag $IMAGE_TAG"
+
+  build:
+    commands:
+      - docker build -f Dockerfile.web -t "$ECR_REPO_URI:$IMAGE_TAG" .
+      - docker tag "$ECR_REPO_URI:$IMAGE_TAG" "$ECR_REPO_URI:latest"
+
+  post_build:
+    commands:
+      - docker push "$ECR_REPO_URI:$IMAGE_TAG"
+      - docker push "$ECR_REPO_URI:latest"
+      - echo "Pushed $ECR_REPO_URI:$IMAGE_TAG"

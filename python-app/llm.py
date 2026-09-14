@@ -39,9 +39,33 @@ _SYSTEM = (
     "never when the underlying crawl is thin.\n"
     "Return STRICT JSON only, no prose, with exactly these keys: "
     "opportunity_score (int 0-100), confidence_score (int 0-100), reasons "
-    "(array of short strings citing concrete evidence and sub-scores), "
+    "(array of short strings citing concrete evidence and sub-scores), gaps "
+    "(array of short strings naming what this business plausibly LACKS that "
+    "the niche service would supply), "
     "first_line (a short personalized outreach opening that references a "
-    "concrete detail from the data)."
+    "concrete detail from the data).\n"
+    "reasons and gaps are DIFFERENT and must not overlap. reasons is the "
+    "evidence behind your two scores, and for a strong lead that evidence "
+    "reads as praise -- \"strong digital presence (presence=100)\" is a "
+    "reason. gaps is what the outreach email will be built around, so every "
+    "entry must be a defect or an absence the service addresses. The same "
+    "fact can be one or the other depending on which way it points: \"3 "
+    "social profiles and 6 phone numbers found, but no email address "
+    "published\" is a gap. If the evidence supports no honest gap, return an "
+    "empty array -- an invented gap writes an email that insults a business "
+    "for a problem it does not have.\n"
+    "CHECK THE LISTING FIELDS IN BUSINESS FIRST, before inferring a gap from "
+    "the scrape. They are Google's own record of the business, so a gap drawn "
+    "from one is a fact the recipient can verify in seconds, while a gap "
+    "inferred from a crawl is a guess that may be wrong (the site may be "
+    "JS-rendered, or the feature may sit behind a login). In order of "
+    "strength: is_claimed=false means the owner has not verified the listing, "
+    "so its hours, photos and phone are Google's guesses that the owner cannot "
+    "edit -- that is a gap. An absent or null is_claimed means you DO NOT "
+    "KNOW, so never write that the listing is unclaimed. book_online_url "
+    "absent, work_hours/hours empty, a missing website, a very low "
+    "review_count, and a high rating with almost no reviews are all gaps of "
+    "the same kind. Prefer these to anything you would have to infer."
 )
 
 
@@ -126,14 +150,29 @@ def build_draft_prompt(business, intelligence, niche, weakness="", first_line=""
     if first_line:
         gap = (gap + "\nEarlier opener: " + first_line) if gap else \
             "Earlier opener: " + first_line
+    # The caution is not decoration and not only for prompt quality. Rows scored
+    # before `gaps` existed have the old reason list sitting in `weakness`, and
+    # scoring evidence reads as praise -- "strong digital presence (presence=
+    # 100)" is a compliment telling the model the opposite of what this heading
+    # claims. A drafter handed that and asked for an email does not report the
+    # contradiction; it resolves it by inventing a defect, which is how a lead
+    # scored STRONG got an email saying its site needs fixing. Rows are only
+    # re-scored on a new run, so the legacy shape stays reachable and the prompt
+    # has to survive it.
     if not gap:
         gap = ("(no specific gap flagged — infer a plausible but honest one from "
                "the business intelligence, or keep the email to a helpful offer)")
+    else:
+        gap += ("\n\n(If any line above is a compliment rather than a gap -- it "
+                "describes something the business already does well -- then no "
+                "gap was flagged: infer a plausible but honest one, or keep the "
+                "email to a helpful offer. Do NOT treat a strength as a defect.)")
     return (
         f"WHAT WE SELL: {niche}\n\n"
         f"THE BUSINESS (prospect):\n{biz}\n\n"
         f"WEBSITE INTELLIGENCE (scraped):\n{info}\n\n"
-        f"WHY THEY MAY NEED THIS:\n{gap}\n\n"
+        f"WHY THEY MAY NEED THIS (what they plausibly LACK — build the email "
+        f"around one of these, and never around a strength):\n{gap}\n\n"
         f"WHO THE SELLER IS:\n{_seller_line(seller)}\n\n"
         f"{resume}\n\n{portfolio}\n\n"
         f"ADDITIONAL CONTEXT:\n{extra_hints}\n\n"
@@ -179,6 +218,28 @@ def _first_json(text):
     raise ValueError(f"Unbalanced JSON in model reply: {text[:300]!r}")
 
 
+def _str_list(parsed, key):
+    """A model's list-of-short-strings field, coerced into one.
+
+    Shared by `reasons` and `gaps` because they have identical shape tolerance
+    requirements: the key may be absent (older prompt, different provider), a
+    bare string (a model that ignored "array"), or not a list at all.
+
+    `None` is dropped rather than stringified. `str(None)` is `"None"`, which
+    is truthy, so a model that emits `["a real reason", null]` -- a common way
+    to leave a slot empty -- used to yield the literal string "None" as an
+    entry. That string was then shown to the drafter, and for `gaps` it would
+    be shown under "WHY THEY MAY NEED THIS".
+    """
+    value = (parsed or {}).get(key)
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [s for s in (str(x).strip() for x in value
+                        if x is not None and not isinstance(x, bool)) if s]
+
+
 def _parse_score(content):
     def _clamp_int(parsed, key, default=0):
         try:
@@ -188,12 +249,15 @@ def _parse_score(content):
         return max(0, min(100, v))
 
     parsed = _first_json(content)
-    reasons = parsed.get("reasons")
-    if isinstance(reasons, str):
-        reasons = [reasons]
-    if not isinstance(reasons, list):
-        reasons = []
-    reasons = [r for r in (str(x).strip() for x in reasons) if r]
+    reasons = _str_list(parsed, "reasons")
+    # `gaps` is a separate key for the same reason `reasons` exists: they answer
+    # different questions, and collapsing them into one field is what put
+    # "strong digital presence" in a column named `weakness`, under a prompt
+    # heading asking for a defect. A model that predates this key (or ignores
+    # it) returns no gaps, and an empty list is the honest reading of that --
+    # the drafter has a fallback for "no gap flagged", and it does not involve
+    # inventing one.
+    gaps = _str_list(parsed, "gaps")
     opportunity = _clamp_int(parsed, "opportunity_score",
                              _clamp_int(parsed, "score", 0))
     confidence = _clamp_int(parsed, "confidence_score")
@@ -202,6 +266,7 @@ def _parse_score(content):
         "confidence_score": confidence,
         "score": opportunity,               # backward-compat alias
         "reasons": reasons,
+        "gaps": gaps,
         "first_line": str(parsed.get("first_line", "") or "").strip(),
     }
 

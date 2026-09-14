@@ -1,0 +1,605 @@
+{% extends "base.html" %}
+{% block title %}Run · Lodestone{% endblock %}
+{% block heading %}Run <span class="muted small" id="rid">{{ run_id }}</span>{% endblock %}
+{% block actions %}
+  <button id="export">Export approved as CSV</button>
+  <button id="cancel" class="danger" hidden>Cancel run</button>
+{% endblock %}
+{% block body %}
+
+<div class="row" style="align-items:center; margin-bottom:16px">
+  <span class="pill" id="status">loading</span>
+  <span class="t-b-medium muted" id="why"></span>
+</div>
+
+<div class="card" id="progress-card">
+  <div class="bar"><i id="bar" style="width:0%"></i></div>
+  <div id="stats"></div>
+</div>
+
+<div class="sect">
+  <span class="t-t-medium">Why it stopped</span>
+  <span class="rule"></span>
+</div>
+<div class="card" id="report"><span class="muted">Waiting for the run…</span></div>
+
+<div class="sect">
+  <span class="t-t-medium">Prospects found</span>
+  <span class="rule"></span>
+</div>
+
+<div class="card flush">
+  <table>
+    <thead>
+      <tr>
+        <th>Business</th>
+        <th>Category</th>
+        <th>Phone</th>
+        <th>Website</th>
+        <th>Locality</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="prospects-body"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="sect">
+  <span class="t-t-medium">Drafts from this run</span>
+  <span class="rule"></span>
+</div>
+
+<div class="split">
+  <div class="card dlist" id="drafts">
+    <div class="li"><div class="body muted">Loading…</div></div>
+  </div>
+
+  <div class="card flush" id="editor" hidden>
+    <div class="row" style="align-items:center; gap:10px; padding:16px 16px 0">
+      <span class="pill" id="estatus">draft</span>
+      <span class="t-b-small muted">rev <span id="erev">1</span></span>
+      <span class="spacer"></span>
+      <span class="t-b-small muted" id="meta"></span>
+    </div>
+
+    <div style="padding:8px 16px 16px">
+      <div class="tf">
+        <input id="to" placeholder=" ">
+        <label for="to">To</label>
+      </div>
+      <div class="tf">
+        <input id="subject" placeholder=" ">
+        <label for="subject">Subject</label>
+      </div>
+      <div class="tf" style="margin-bottom:0">
+        <textarea id="body" placeholder=" "></textarea>
+        <label for="body">Email</label>
+      </div>
+    </div>
+
+    <div class="row" style="gap:8px; padding:12px 16px 16px;
+                            border-top:1px solid var(--outline-variant)">
+      <button id="approve">Approve</button>
+      <button id="save" class="secondary">Save edits</button>
+      <button id="reject" class="danger">Reject</button>
+      <span class="spacer"></span>
+      <span class="t-b-small muted" id="sendhint">send unlocks on approval</span>
+      <button id="send" class="secondary">Send</button>
+    </div>
+  </div>
+
+  <div class="card" id="pick">
+    <div class="li">
+      <div class="body">
+        <div class="t-b-large">Pick a draft to review</div>
+        <div class="t-b-medium muted">Read it, change anything you want, then
+          approve. Approving is what unlocks Send, and Send asks first,
+          because it can't be undone.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sect">
+  <span class="t-t-medium">What it did, in order</span>
+  <span class="rule"></span>
+</div>
+<div class="card"><div class="list" id="events">
+  <div class="li"><div class="body muted small">Nothing yet.</div></div>
+</div></div>
+
+<div id="notice" class="note" hidden></div>
+<div id="error" class="error" hidden></div>
+
+{% endblock %}
+{% block script %}
+<script>
+  var A = window.LEADGEN_APP;
+  if (A.requireLogin()) { /* redirected */ }
+
+  var RUN_ID = {{ run_id | tojson }};
+  var lastSeq = 0;
+  var current = null;      // the draft being edited
+  var terminal = false;
+
+  // Keyed on agent/budget.py's TerminalReason values — the ONLY vocabulary
+  // `terminal_reason` is ever set to. This map previously listed the CAP NAMES
+  // (max_find_calls, max_llm_calls, max_spend_usd, max_turns), which are never
+  // written; the three values that ARE written most often (budget_exhausted,
+  // max_attempts, timeout) were missing entirely. So the commonest stop of all
+  // — budget_exhausted — fell through to the generic "This run has finished."
+  // and the stated stop reason, which is the product's whole claim, was blank.
+  // tests/test_stop_reason_vocabulary.py fails if this drifts again.
+  var WHY = {
+    target_met:       "The agent found the number of qualified leads you asked for.",
+    budget_exhausted: "The agent hit a budget cap: searches, LLM calls or spend.",
+    max_attempts:     "The agent used every turn it was allowed.",
+    timeout:          "The agent ran out of wall-clock time.",
+    no_results:       "The agent stopped early: two turns produced nothing new.",
+    user_cancelled:   "You cancelled this run.",
+    error:            "The run errored."
+  };
+
+  /* The trace, in plain words.
+   *
+   * Events arrive as developer records (kind "turn", message "turn 1",
+   * trail number 2): complete, and about as welcoming as a log file. That
+   * is the wrong trade for the one view the seller watches while a run
+   * works. KIND_LABEL translates every known kind; anything new falls back
+   * to humanize() rather than vanishing, so this map going stale degrades
+   * instead of hiding data. Heartbeat and infra kinds (turn,
+   * dispatch_done) are skipped at render: lastSeq still advances over
+   * them, polling is unaffected, and every row stays in the database. The
+   * trail shows WHEN, from created_at, not a database ordinal: gaps
+   * between timestamps are honest about silences in a way consecutive
+   * numbers hide.
+   */
+  var KIND_LABEL = {
+    dispatch: "Sent to the runner",
+    start:    "Goal",
+    place:    "Search area",
+    search:   "Searching",
+    found:    "Search results",
+    enrich:   "Checking businesses",
+    scored:   "Shortlist update",
+    warning:  "Warning",
+    stop:     "Finished"
+  };
+  var SKIP_KIND = { turn: true, dispatch_done: true };
+
+  function eventTime(e) {
+    // Local clock, seconds precision: enough to see the rhythm of a run
+    // (and its pauses) without a wall of digits. Empty when the row
+    // carries no timestamp, never a crash.
+    try {
+      var d = new Date(e && e.created_at);
+      if (!isNaN(d)) {
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit",
+                                          second: "2-digit" });
+      }
+    } catch (err) { /* fall through to "" below */ }
+    return "";
+  }
+
+  function renderEvent(e) {
+    if (!e || SKIP_KIND[e.kind]) return "";
+    var label = KIND_LABEL[e.kind] || humanize(e.kind || "event");
+    var msg = e.message || "";
+    // The stop event carries a reason CODE; the page already owns plain
+    // words for it, so the trace ends with a sentence, not "no_results".
+    if (e.kind === "stop" && WHY[msg]) msg = WHY[msg];
+    return '<div class="li"><div class="body">'
+      + '<div class="t-b-small muted">' + A.esc(label) + '</div>'
+      + '<div class="t-b-large">' + A.esc(msg) + '</div>'
+      + '</div><span class="trail">' + A.esc(eventTime(e)) + '</span></div>';
+  }
+
+  /* The run's own record, in words.
+   *
+   * `runs.report` is a JSON object. It used to be printed into a <pre> with
+   * JSON.stringify — technically complete and completely unreadable, which is
+   * the wrong trade for the one artefact that explains what happened. Every
+   * field it can contain gets a sentence; anything new that the agent starts
+   * recording still renders (via the generic fallback) rather than vanishing,
+   * so this map going stale degrades instead of hiding data.
+   */
+  var REPORT_LABELS = {
+    reason:              "Why it stopped",
+    terminal_reason:     "Why it stopped",
+    attempts:            "Turns in a row that changed nothing",
+    llm_calls:           "Times it asked the model to think",
+    estimated_spend_usd: "Its own estimate of what this cost",
+    elapsed_s:           "Wall-clock time",
+    qualified:           "Leads that cleared your threshold",
+    drafts:              "Drafts written",
+    find_calls:          "Searches used",
+    leads_found:         "Leads found",
+    campaign_id:         "Campaign",
+    run_id:              "Run",
+    target_qualified:    "Leads you asked for",
+    max_llm_calls:       "Model-call cap",
+    max_find_calls:      "Search cap",
+    max_spend_usd:       "Spend cap",
+    max_turns:           "Turn cap",
+    max_wall_clock_s:    "Time cap",
+    estimated_unit_cost_usd: "Cost per unit, estimate",
+    note:                "Note",
+    warnings:            "Warnings",
+    error:               "Error"
+  };
+
+  // Caps exist so the model cannot talk its way past them. Worth saying out
+  // loud wherever one is shown, rather than leaving a bare number.
+  var CAP_NOTE = {
+    max_llm_calls:      "The run refuses to start work that would cross this.",
+    max_find_calls:     "Each search is one billed Maps lookup.",
+    max_spend_usd:      "The run refuses to start work that would cross this.",
+    max_turns:          "One turn is a single decision by the model.",
+    max_wall_clock_s:   "Kept under AgentCore's ceiling so a run always ends."
+  };
+
+  function humanize(k) {
+    return String(k).replace(/_/g, " ").replace(/\b\w/g, function (c) {
+      return c.toUpperCase();
+    });
+  }
+
+  function showValue(v) {
+    if (v === null || v === undefined) return "n/a";
+    if (typeof v === "boolean") return v ? "Yes" : "No";
+    if (typeof v === "object") return JSON.stringify(v);
+    return String(v);
+  }
+
+  /* One level of nesting is flattened — `bounds` is the only object the report
+   * carries, and burying five caps behind a disclosure triangle would hide
+   * exactly the numbers that explain why a run stopped when it did. */
+  function reportRows(report) {
+    var rows = [];
+    Object.keys(report).forEach(function (k) {
+      var v = report[k];
+      // An empty warnings list is the common case, not information: without
+      // this every finished run would carry a "Warnings: []" row.
+      if (k === "warnings" && (!v || !v.length)) return;
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        Object.keys(v).forEach(function (k2) {
+          rows.push([REPORT_LABELS[k2] || humanize(k2), showValue(v[k2]),
+                     CAP_NOTE[k2] || ""]);
+        });
+        return;
+      }
+      rows.push([REPORT_LABELS[k] || humanize(k), showValue(v),
+                 CAP_NOTE[k] || ""]);
+    });
+    return rows;
+  }
+
+  function renderReport(run) {
+    var report = run.report;
+    if (!report) {
+      A.el("report").innerHTML = '<div class="li"><div class="body">'
+        + '<div class="t-b-large">'
+        + (run.status === "running"
+            ? "Still running. The report is written when the run stops."
+            : "No report was recorded.")
+        + '</div>'
+        + (run.status === "running"
+            ? '<div class="t-b-medium muted">Every run ends with exactly one '
+              + 'recorded reason. It appears here, in words, the moment this '
+              + 'one stops.</div>'
+            : "")
+        + '</div></div>';
+      return;
+    }
+
+    var why = WHY[report.reason || report.terminal_reason];
+    var rows = reportRows(report);
+    var html = "";
+    if (why) {
+      html += '<div class="li"><div class="body">'
+        + '<div class="t-b-large">' + A.esc(why) + '</div>'
+        + '<div class="t-b-medium muted">Recorded as <b>'
+        + A.esc(report.reason || report.terminal_reason) + '</b>.</div>'
+        + '</div></div><div class="divider full"></div>';
+    }
+    html += rows.map(function (r) {
+      return '<div class="li"><div class="body">'
+        + '<div class="t-b-large">' + A.esc(r[0]) + '</div>'
+        + '<div class="t-b-medium muted">' + A.esc(r[1])
+        + (r[2] ? ": " + A.esc(r[2]) : "") + '</div>'
+        + '</div></div>';
+    }).join('<div class="divider full"></div>');
+
+    // The raw object is still here, one click away, for anyone who wants it.
+    html += '<div class="divider full"></div><div class="li"><div class="body">'
+      + '<details><summary>Show the raw record</summary><pre>'
+      + A.esc(JSON.stringify(report, null, 2))
+      + '</pre></details></div></div>';
+
+    A.el("report").innerHTML = html;
+  }
+
+  function setStatus(s) {
+    A.el("status").textContent = s;
+    A.el("status").className = "pill " + s;
+  }
+
+  function renderRun(run, progress) {
+    var p = progress || {};
+    setStatus(run.status);
+
+    var why = WHY[run.terminal_reason];
+    A.el("why").textContent = why || (run.status === "running"
+      ? "running, this page updates every " + (A.cfg.pollMs / 1000) + "s"
+      : "");
+    if (why) terminal = true;
+
+    A.el("cancel").hidden = run.status !== "running";
+
+    A.el("stats").innerHTML = [
+      ["Qualified", p.qualified], ["Drafts", p.drafts],
+      ["Searches", p.find_calls], ["LLM calls", p.llm_calls],
+      ["Est. spend", p.estimated_spend_usd == null ? null
+        : A.money(p.estimated_spend_usd)],
+      ["Elapsed", p.elapsed_s == null ? null : p.elapsed_s + "s"]
+    ].map(function (kv) {
+      return '<span class="stat"><b>' + A.esc(kv[1] == null ? "n/a" : kv[1])
+           + '</b><span>' + A.esc(kv[0]) + '</span></span>';
+    }).join("");
+
+    var target = (p.target_qualified || 0);
+    var have = (p.qualified || 0);
+    var pct = target ? Math.min(100, Math.round(have / target * 100))
+                     : (run.status === "running" ? 10 : 100);
+    A.el("bar").style.width = pct + "%";
+
+    renderReport(run);
+  }
+
+  async function tick() {
+    var out = await A.api("/runs/" + encodeURIComponent(RUN_ID) +
+                          "/events?after=" + lastSeq);
+    renderRun(out, out.progress);
+
+    if (out.events && out.events.length) {
+      lastSeq = out.last_seq;
+      // The trace ACCUMULATES: each poll carries only what is new (the
+      // endpoint answers ?after=lastSeq), and it is appended to what is
+      // already on screen. Replacing innerHTML here used to collapse the
+      // story to the latest batch every few seconds, while the "What it
+      // did, in order" header above promised an order the page erased.
+      // A batch of only skipped kinds (heartbeats) appends nothing, and
+      // the "Nothing yet." placeholder survives until the first real row.
+      var html = out.events.map(renderEvent).filter(function (h) {
+        return h;
+      }).join('<div class="divider"></div>');
+      if (html) {
+        var box = A.el("events");
+        box.innerHTML = box.dataset.live
+          ? box.innerHTML + '<div class="divider"></div>' + html
+          : html;
+        box.dataset.live = "1";
+      }
+    }
+
+    await loadDrafts();
+    await loadProspects();
+
+    // Stop polling once the run is over. Without this the tab would keep
+    // hammering the API forever for a run that will never change again.
+    if (terminal || out.status !== "running") {
+      clearInterval(timer);
+      A.el("why").textContent = WHY[out.terminal_reason] || WHY[out.status]
+        || "This run has finished.";
+    }
+  }
+
+  async function loadDrafts() {
+    // Scoped to THIS run. Without the filter this listed the seller's entire
+    // draft library under every run -- a run that produced nothing showed
+    // drafts written by other runs, which reads as a working feature and is
+    // actually a wrong answer.
+    var out = await A.api("/drafts/list", { body: { run_id: RUN_ID, limit: 50 } });
+    var rows = out.drafts || [];
+    if (!rows.length) {
+      A.el("drafts").innerHTML = '<div class="li"><div class="body">'
+        + '<div class="t-b-large muted">No drafts yet</div>'
+        + '<div class="t-b-small muted">The agent writes one once it has '
+        + 'found a business worth writing to.</div></div></div>';
+      return;
+    }
+    A.el("drafts").innerHTML = rows.map(function (d) {
+      return '<button class="ditem" data-draft="' + A.esc(d.id) + '">'
+        + '<div class="to">' + A.esc(d.to_email || "no address found")
+        + '</div>'
+        + '<div class="sj">' + A.esc(d.subject || "(no subject)") + '</div>'
+        + '<span class="pill ' + A.esc(d.status) + '">'
+        + A.esc(d.status) + '</span>'
+        + '</button>';
+    }).join("");
+    Array.prototype.forEach.call(
+      A.el("drafts").querySelectorAll("button[data-draft]"),
+      function (b) {
+        b.addEventListener("click", function () {
+          setActive(b.dataset.draft);
+          openDraft(b.dataset.draft);
+        });
+      });
+  }
+
+  // Every business the run's searches found, grouped by campaign. This is
+  // the table that answers "did it find anything" when nothing qualified:
+  // prospects exist whether or not they cleared the threshold, and their
+  // statuses say how far each one got. Polled with everything else, so rows
+  // appear while the run is still going. A failure here keeps the last
+  // rendered state rather than blanking the table mid run.
+  async function loadProspects() {
+    var out;
+    try {
+      out = await A.api("/prospects/list",
+                        { body: { run_id: RUN_ID, limit: 200 } });
+    } catch (e) { return; }
+    var groups = out.campaigns || [];
+    if (!out.count) {
+      A.el("prospects-body").innerHTML = '<tr><td colspan="6" class="muted">'
+        + 'Nothing found yet. Searches land here as the run makes them.'
+        + '</td></tr>';
+      return;
+    }
+    A.el("prospects-body").innerHTML = groups.map(function (g) {
+      var head = '<tr><td colspan="6" class="muted"><b>'
+        + A.esc(g.name || "Untitled campaign") + '</b> \u00B7 '
+        + g.prospect_count
+        + (g.prospect_count === 1 ? " prospect" : " prospects") + '</td></tr>';
+      return head + (g.prospects || []).map(function (p) {
+        var site = p.website
+          ? '<a href="' + A.esc(p.website)
+            + '" target="_blank" rel="noopener">open</a>'
+          : '<span class="muted">none</span>';
+        return '<tr>'
+          + '<td>' + A.esc(p.business_name || "(no name)") + '</td>'
+          + '<td class="muted">' + A.esc(p.category || "") + '</td>'
+          + '<td class="muted">' + A.esc(p.phone || "") + '</td>'
+          + '<td>' + site + '</td>'
+          + '<td class="muted">' + A.esc(p.locality || "") + '</td>'
+          + '<td><span class="pill ' + A.esc(p.status || "") + '">'
+          + A.esc(p.status || "") + '</span></td>'
+          + '</tr>';
+      }).join("");
+    }).join("");
+  }
+
+  function setActive(id) {
+    Array.prototype.forEach.call(
+      A.el("drafts").querySelectorAll("button[data-draft]"),
+      function (b) { b.className = "ditem" + (b.dataset.draft === id
+        ? " on" : ""); });
+  }
+
+  async function openDraft(id) {
+    var out = await A.api("/drafts/" + encodeURIComponent(id), { method: "GET" });
+    current = out.draft;
+    A.el("editor").hidden = false;
+    A.el("pick").hidden = true;
+    A.el("to").value = current.to_email || "";
+    A.el("subject").value = current.subject || "";
+    A.el("body").value = current.email_body || "";
+    A.el("meta").textContent = current.to_email || "";
+    A.el("estatus").textContent = current.status;
+    A.el("estatus").className = "pill " + current.status;
+    A.el("erev").textContent = current.revision || 1;
+    A.el("approve").disabled = current.status !== "draft";
+    // Sending is the one irreversible action here: `idx_drafts_sent_once`
+    // makes `sent` final at the database level, so there is no undo and no
+    // retry. Only an approved draft can be sent, and once it has been, the
+    // button stays off rather than looking available.
+    A.el("send").disabled = current.status !== "approved";
+    A.el("reject").disabled = current.status === "rejected";
+    A.el("sendhint").textContent = current.status === "approved"
+      ? "approved, sending asks first"
+      : "send unlocks on approval";
+  }
+
+  async function act(fn) {
+    A.showError(A.el("error"), "");
+    try { await fn(); }
+    catch (e) { A.showError(A.el("error"), e.message); }
+    await loadDrafts();
+    if (current) setActive(current.id);
+  }
+
+  A.el("save").addEventListener("click", function () {
+    act(async function () {
+      var out = await A.api("/drafts/" + encodeURIComponent(current.id), {
+        method: "PATCH",
+        body: { to_email: A.el("to").value.trim(),
+                subject: A.el("subject").value,
+                email_body: A.el("body").value }
+      });
+      current = out.draft;
+      A.el("meta").textContent = current.to_email || "";
+      A.el("erev").textContent = current.revision || 1;
+      note("Saved as revision " + current.revision + ".");
+    });
+  });
+
+  A.el("approve").addEventListener("click", function () {
+    act(async function () {
+      await A.api("/drafts/" + encodeURIComponent(current.id) + "/approve",
+                  { body: {} });
+      await openDraft(current.id);
+      note("Approved. Send is now unlocked for this draft.");
+    });
+  });
+
+  A.el("send").addEventListener("click", function () {
+    act(async function () {
+      // Confirmed, not one-click. A send cannot be taken back, and the button
+      // sits beside "Save edits" and "Reject".
+      if (!window.confirm("Send this email to " + (current.to_email || "?")
+            + "?\n\nThis cannot be undone.")) return;
+      var out = await A.api("/drafts/" + encodeURIComponent(current.id) + "/send",
+                            { body: {} });
+      await openDraft(current.id);
+      note("Sent" + (out.draft && out.draft.provider_message_id
+            ? ", message id " + out.draft.provider_message_id : "") + ".");
+    });
+  });
+
+  A.el("reject").addEventListener("click", function () {
+    act(async function () {
+      await A.api("/drafts/" + encodeURIComponent(current.id) + "/reject",
+                  { body: {} });
+      await openDraft(current.id);
+      note("Rejected. It stays in the list and will not be sent.");
+    });
+  });
+
+  A.el("export").addEventListener("click", function () {
+    act(async function () {
+      try {
+        // Scoped to this run, so the CSV matches the table above it. Passing
+        // an empty body exported the seller's entire approved backlog instead.
+        var out = await A.api("/drafts/export", { body: { run_id: RUN_ID } });
+        download(out.csv, "approved-drafts.csv");
+        note(out.note || "Exported.");
+      } catch (e) {
+        // 404 (nothing approved to export) and 409 (something moved out from
+        // under us) are honest answers, not failures — they read as information
+        // rather than as an error. A 400 used to land here too; it no longer
+        // does, because the send gate correctly stopped refusing exports.
+        if (e.status === 404 || e.status === 409) { note(e.message); return; }
+        throw e;
+      }
+    });
+  });
+
+  A.el("cancel").addEventListener("click", function () {
+    act(async function () {
+      var out = await A.api("/runs/" + encodeURIComponent(RUN_ID) + "/cancel",
+                            { body: {} });
+      note(out.note || "Cancellation requested.");
+    });
+  });
+
+  function note(msg) {
+    A.el("notice").hidden = false;
+    A.el("notice").textContent = msg;
+  }
+
+  function download(text, filename) {
+    var blob = new Blob([text], { type: "text/csv" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  var timer = setInterval(function () {
+    tick().catch(function (e) { A.showError(A.el("error"), e.message); });
+  }, A.cfg.pollMs);
+  tick().catch(function (e) { A.showError(A.el("error"), e.message); });
+</script>
+{% endblock %}

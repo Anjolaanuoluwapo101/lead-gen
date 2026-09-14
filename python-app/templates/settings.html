@@ -1,0 +1,330 @@
+{% extends "base.html" %}
+{% block title %}Settings · Lodestone{% endblock %}
+{% block heading %}Settings{% endblock %}
+{% block body %}
+
+<p class="t-b-medium muted" style="margin-bottom:20px">
+  This is who the agent writes as. The name, brand, resume and portfolio below
+  end up inside the drafts it produces, and that is the difference between
+  an email that sounds like you and one that sounds like a mail merge.
+</p>
+
+<div class="card">
+  <h2 style="margin-top:0">Profile</h2>
+  <div class="row" style="margin-bottom:12px">
+    <div class="grow">
+      <div class="tf">
+        <input id="name" placeholder=" ">
+        <label for="name">Your name</label>
+      </div>
+    </div>
+    <div class="grow">
+      <div class="tf">
+        <input id="title" placeholder=" ">
+        <label for="title">Title</label>
+      </div>
+    </div>
+  </div>
+  <div class="row" style="margin-bottom:12px">
+    <div class="grow">
+      <div class="tf">
+        <input id="brand" placeholder=" ">
+        <label for="brand">Brand / agency</label>
+      </div>
+    </div>
+    <div class="grow">
+      <div class="tf">
+        <input id="phone" placeholder=" ">
+        <label for="phone">Phone</label>
+      </div>
+    </div>
+  </div>
+  <div class="tf" style="margin-bottom:6px">
+    <input id="niche" placeholder=" ">
+    <label for="niche">Niche</label>
+  </div>
+  <div class="support" style="margin-bottom:16px">
+    What you sell, and to whom. The scorer compares every business against this,
+    so the narrower it is the better the shortlist.
+    <em>e.g. "web design for restaurants".</em>
+  </div>
+  <div class="row" style="align-items:center">
+    <button id="save-profile">Save profile</button>
+    <span class="t-b-small muted" id="email-line"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Resume</h2>
+  <p class="t-b-medium muted">
+    A .pdf, .docx, .txt or .md file. Only the extracted text is kept, the file
+    itself is never stored, and that text is given to the model when it drafts.
+  </p>
+  <div class="row" style="align-items:center">
+    <input id="resume-file" type="file"
+           accept=".pdf,.docx,.txt,.md,.markdown" style="max-width:320px">
+    <button id="save-resume">Upload resume</button>
+    <span class="t-b-small muted" id="resume-size"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Portfolio</h2>
+  <p class="t-b-medium muted">
+    Give a URL and the server fetches and stores its text, so the model can
+    reference your actual work instead of inventing examples.
+  </p>
+  <div class="row">
+    <div class="grow">
+      <div class="tf">
+        <input id="portfolio" placeholder=" ">
+        <label for="portfolio">Portfolio URL</label>
+      </div>
+    </div>
+    <div class="grow" style="max-width:220px">
+      <label for="render">Render mode
+        <button type="button" class="q right" data-tip="How the page is fetched. 'auto' uses a plain HTML fetch and only falls back to a headless browser if the page looks empty. The browser is slower and heavier.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+        </button>
+      </label>
+      <select id="render">
+        <option value="auto">auto</option>
+        <option value="html">html (static)</option>
+        <option value="js">js (headless browser)</option>
+      </select>
+    </div>
+    <button id="fetch-portfolio">Fetch</button>
+  </div>
+  <span class="t-b-small muted" id="portfolio-size"></span>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Provider keys</h2>
+  <p class="t-b-medium muted">
+    Optional. Leave a field blank to keep the current value. Keys are encrypted
+    at rest and are never shown again. You will only ever see whether one is
+    set.
+  </p>
+  <div id="providers"><span class="muted">Loading…</span></div>
+</div>
+
+<div id="notice" class="note" hidden></div>
+<div id="error" class="error" hidden></div>
+
+{% endblock %}
+{% block script %}
+<script>
+  var A = window.LEADGEN_APP;
+  if (A.requireLogin()) { /* redirected */ }
+
+  var sellerId = null;
+
+  function note(msg) {
+    A.el("notice").hidden = false;
+    A.el("notice").textContent = msg;
+  }
+
+  async function act(fn) {
+    A.showError(A.el("error"), "");
+    try { await fn(); }
+    catch (e) { A.showError(A.el("error"), e.message); }
+  }
+
+  /* `/seller/me`, deliberately not `/seller/by-email`.
+   *
+   * by-email takes the identity to fetch from the REQUEST, so it cannot tell
+   * you reading your own profile from anyone reading yours — and it returns
+   * resume and portfolio text. `/seller/me` takes it from the credential, so
+   * reading someone else's profile is not an expressible request.
+   *
+   * The seller row itself is created on first authenticated contact
+   * (`auth.seller_for_user` find-or-creates on the verified email), which is
+   * what makes signup self-serve without a profile-creation endpoint.
+   */
+  async function load() {
+    var out = await A.api("/seller/me");
+    var s = out.seller;
+    sellerId = s.id;
+    A.el("email-line").textContent = s.email || A.el("whoami").textContent;
+    A.el("name").value = s.name || "";
+    A.el("title").value = s.title || "";
+    A.el("brand").value = s.brand || "";
+    A.el("phone").value = s.phone || "";
+    A.el("niche").value = s.niche || "";
+    A.el("render").value = s.render_mode || "auto";
+    // These are this seller's OWN blobs, over their own session — showing the
+    // size is more useful than showing the text, and it avoids re-rendering a
+    // resume into the page.
+    var rl = (s.resume_text || "").length;
+    var pl = (s.portfolio_text || "").length;
+    A.el("resume-size").textContent = rl
+      ? rl.toLocaleString() + " characters stored" : "no resume stored yet";
+    A.el("portfolio-size").textContent = pl
+      ? pl.toLocaleString() + " characters stored" : "no portfolio stored yet";
+    await loadProviders();
+  }
+
+  /* The config form mirrors the server's shape exactly:
+   *   { llm:    {provider, model, base_url, api_key},
+   *     finder: {provider, login, password},
+   *     smtp:   {host, port, user, from_email, from_name, password} }
+   * and it is a PATCH. Secret fields are write-only — the GET returns a masked
+   * view where a secret is only ever a boolean, so an untouched field must send
+   * nothing at all rather than an empty string (which would CLEAR the key).
+   *
+   * The groups are described as data rather than as a branch per provider. The
+   * previous version named each field to send by hand, which is why adding SMTP
+   * would have meant three more lines in the save handler and a third ternary
+   * in the secret label — and why a field added to the schema but not to that
+   * list would have silently never saved.
+   */
+  var PROVIDER_GROUPS = [
+    { id: "llm", label: "LLM", blurb: "The model that writes the emails and decides what to do next.", secret: "api_key", secretLabel: "API key",
+      fields: ["provider", "model", "base_url"] },
+    { id: "finder", label: "Lead finder", blurb: "Where businesses come from: the Maps search and the enrichment lookup.", secret: "password",
+      secretLabel: "Password", fields: ["provider", "login"] },
+    { id: "smtp", label: "Sending (SMTP)", blurb: "How mail leaves. Your own address, so replies land in your inbox and not a platform's.", secret: "password",
+      secretLabel: "Password / app password",
+      fields: ["host", "port", "user", "from_email", "from_name"] }
+  ];
+
+  async function loadProviders() {
+    var out = await A.api("/seller/" + encodeURIComponent(sellerId) + "/config");
+    var cfg = out.config || {};
+    A.el("providers").innerHTML = PROVIDER_GROUPS.map(function (g) {
+      return row(g, cfg[g.id] || {});
+    }).join("");
+    Array.prototype.forEach.call(
+      document.querySelectorAll("button[data-provider]"),
+      function (b) {
+        b.addEventListener("click", function () {
+          act(async function () {
+            var g = null;
+            PROVIDER_GROUPS.forEach(function (x) {
+              if (x.id === b.dataset.provider) g = x;
+            });
+            if (!g) return;
+
+            // Every input in this group, rather than a hand-written list: a
+            // field the server accepts but this loop does not name can never be
+            // saved, and nothing reports that. Only non-empty values are sent,
+            // so blanking a box does not clear a setting.
+            var group = {};
+            g.fields.forEach(function (f) {
+              var input = A.el(g.id + "-" + f);
+              if (input && input.value.trim()) group[f] = input.value.trim();
+            });
+
+            // Only send a secret if it was actually typed. An empty string here
+            // means "clear the key", which is never what leaving a box alone
+            // should do.
+            var secret = A.el(g.id + "-secret");
+            if (secret && secret.value.trim()) {
+              group[g.secret] = secret.value.trim();
+            }
+            if (!Object.keys(group).length) { note("Nothing to change."); return; }
+
+            var body = {};
+            body[g.id] = group;
+            await A.api("/seller/" + encodeURIComponent(sellerId) + "/config",
+                        { method: "PATCH", body: body });
+            note(g.id === "smtp"
+              ? "Sending settings saved. They apply to drafts sent after this."
+              : "Provider settings saved.");
+            await loadProviders();
+          });
+        });
+      });
+  }
+
+  function row(g, cfg) {
+    var inputs = g.fields.map(function (f) {
+      return '<div class="grow"><label>' + A.esc(f) + '</label>'
+        + '<input id="' + g.id + '-' + f + '" value="' + A.esc(cfg[f] || "")
+        + '" placeholder="' + (f === "base_url" ? "optional override"
+                                 : "e.g. " + A.esc(f)) + '"></div>';
+    }).join("");
+    // The GET returns a secret as the literal "********" when set, and null
+    // when not. Only the truthiness is used — the placeholder is a label, and
+    // the masked value must never be loaded into an editable field, or saving
+    // the form would overwrite the real key with asterisks.
+    var secretSet = cfg[g.secret];
+    // These fields keep their label above the box rather than floating: the
+    // secret's placeholder carries real information ("leave blank to keep"),
+    // which a floating label would sit on top of.
+    return '<div class="sect" style="margin-top:8px">'
+      + '<span class="t-t-medium">' + A.esc(g.label) + '</span>'
+      + '<span class="rule"></span>'
+      + '<span class="chip">' + (secretSet ? "key set" : "no key") + '</span>'
+      + '</div>'
+      + '<p class="t-b-small muted" style="margin:-4px 0 10px">'
+      + A.esc(g.blurb) + '</p>'
+      + '<div class="row" style="margin-bottom:14px">' + inputs
+      + '<div class="grow"><label>' + A.esc(g.secretLabel) + '</label>'
+      + '<input id="' + g.id + '-secret" type="password" placeholder="'
+      + (secretSet ? "•••• set, leave blank to keep" : "not set") + '"></div>'
+      + '<button data-provider="' + g.id + '">Save</button></div>';
+  }
+
+  A.el("save-profile").addEventListener("click", function () {
+    act(async function () {
+      var body = { name: A.el("name").value, title: A.el("title").value,
+                   brand: A.el("brand").value, phone: A.el("phone").value,
+                   niche: A.el("niche").value,
+                   render_mode: A.el("render").value };
+      await A.api("/seller/" + encodeURIComponent(sellerId),
+                  { method: "PATCH", body: body });
+      note("Profile saved.");
+    });
+  });
+
+  /* The route takes {filename, content_base64} — raw file BYTES, not text —
+   * because it does the extraction server-side (pdf/docx included), and only
+   * the extracted text is ever stored. So the browser base64-encodes the file
+   * and sends it; the file itself never lands in the database.
+   */
+  function readBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onerror = function () { reject(new Error("could not read " + file.name)); };
+      r.onload = function () {
+        // strip the "data:...;base64," prefix — the server wants bare base64
+        resolve(String(r.result).split(",", 2)[1] || "");
+      };
+      r.readAsDataURL(file);
+    });
+  }
+
+  A.el("save-resume").addEventListener("click", function () {
+    act(async function () {
+      var file = A.el("resume-file").files[0];
+      if (!file) { note("Choose a file first."); return; }
+      note("Uploading " + file.name + " …");
+      var b64 = await readBase64(file);
+      var out = await A.api("/seller/" + encodeURIComponent(sellerId) + "/resume",
+                            { body: { filename: file.name,
+                                      content_base64: b64 } });
+      note("Resume saved: " + (out.chars || 0) + " characters extracted from "
+           + (out.resume_filename || file.name) + ".");
+      A.el("resume-file").value = "";
+      await load();
+    });
+  });
+
+  A.el("fetch-portfolio").addEventListener("click", function () {
+    act(async function () {
+      var url = A.el("portfolio").value.trim();
+      if (!url) { note("Enter a portfolio URL first."); return; }
+      note("Fetching " + url + " …");
+      var out = await A.api("/seller/" + encodeURIComponent(sellerId)
+                            + "/portfolio",
+                            { body: { url: url,
+                                      render_mode: A.el("render").value } });
+      note("Portfolio saved (" + (out.chars || 0) + " characters of text).");
+      await load();
+    });
+  });
+
+  load();
+</script>
+{% endblock %}

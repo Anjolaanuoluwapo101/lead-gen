@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Add a business · Lodestone{% endblock %}
+{% block heading %}Add a business{% endblock %}
+{% block body %}
+
+<p class="t-b-medium muted" style="margin-bottom:20px">
+  For the businesses you already know you want to pitch: a referral, a shop you
+  drive past, someone you met at an event. The search box can only express
+  "plumbers in Austin", and that cannot express any of those.
+</p>
+
+<div class="card">
+  <form id="add">
+
+    <div class="t-b-medium" style="margin-bottom:4px">
+      Address it by whichever you have
+    </div>
+    <div class="support" style="margin-bottom:12px">
+      An id is exact and needs nothing else. A name is a search, so it works
+      best with a location to narrow it down.
+    </div>
+
+    <div class="choices">
+      <label><input type="radio" name="by" value="keyword" checked>
+        Business name</label>
+      <label><input type="radio" name="by" value="place_id">
+        place_id</label>
+      <label><input type="radio" name="by" value="cid">
+        cid</label>
+    </div>
+
+    <div class="tf" style="margin-bottom:4px">
+      <input id="value" placeholder=" " required>
+      <label for="value">What to look up</label>
+    </div>
+    <div id="value-hint" class="support" style="margin-bottom:16px"></div>
+
+    <div class="row">
+      <div class="grow">
+        <label for="location">Where it is
+          <button type="button" class="q left" data-tip="A place the business is in or near, such as a city, a state or a country. Typed places are resolved to the closest real search area before the lookup runs.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </label>
+        <input id="location" placeholder="Leave blank when you give an id">
+      </div>
+      <button id="lookup" type="submit">Look up and add</button>
+    </div>
+  </form>
+
+  <div id="error" class="error" hidden></div>
+
+  <p class="t-b-small muted" style="margin:16px 0 0">
+    One lookup runs per click. It adds the business to your list and stops.
+    Nothing is crawled, scored or drafted until you ask for it, and nothing is
+    ever sent from here.
+  </p>
+</div>
+
+<div class="card" id="result" hidden>
+  <div class="row" style="align-items:center;margin-bottom:12px">
+    <span class="t-t-medium" id="biz-name"></span>
+    <span class="pill" id="biz-status"></span>
+  </div>
+  <dl class="facts" id="biz-facts"></dl>
+</div>
+
+<div class="sect" id="what-next">
+  <span class="t-t-medium">Where it goes</span>
+  <span class="rule"></span>
+</div>
+
+<p class="t-b-small muted">
+  Every hand added business lands in its own campaign called Direct adds, so it
+  never mixes with the batches a run produced. Adding the same business twice
+  reuses the first entry instead of stacking a duplicate in front of you.
+  <a href="/">Back to the dashboard</a>.
+</p>
+
+{% endblock %}
+{% block script %}
+<script>
+  var A = window.LEADGEN_APP;
+  if (A.requireLogin()) { /* redirected */ }
+
+  // What each addressing mode expects, shown as the hint under the field.
+  //
+  // It is the HINT and not the placeholder, deliberately. The floating label is
+  // driven by `input:not(:placeholder-shown)`, so a placeholder left in place
+  // holds the label down over the typed text and the field can no longer say
+  // what it is. The input's placeholder stays a single space, which is how the
+  // rest of the app does it.
+  //
+  // The example matters as much as the description: a place_id and a cid look
+  // alike to anyone who has not used them, and a wrong one is a wasted lookup.
+  var MODES = {
+    keyword:  { eg: "e.g. Mike's Bakery",
+                hint: "Any part of the name. This is a search, so add a " +
+                      "location when the name is a common one." },
+    place_id: { eg: "e.g. ChIJN1t_tDeuEmsRUsoyG83frY4",
+                hint: "The Google identifier for one exact place, taken from " +
+                      "its Maps URL. No location needed." },
+    cid:      { eg: "e.g. 1234567890123456789",
+                hint: "The Google customer id, also called the cid. No " +
+                      "location needed." }
+  };
+
+  function mode() {
+    var picked = document.querySelector('input[name="by"]:checked');
+    return picked ? picked.value : "keyword";
+  }
+
+  function syncMode() {
+    var m = MODES[mode()];
+    A.el("value-hint").textContent = m.hint + " " + m.eg;
+  }
+
+  document.querySelectorAll('input[name="by"]').forEach(function (r) {
+    r.addEventListener("change", syncMode);
+  });
+  syncMode();
+
+  // Label/value pairs, so the row is described the same way whatever DataForSEO
+  // happened to return. A field the lookup did not fill is left out rather than
+  // shown empty.
+  var FIELDS = [
+    ["Category", "category"],
+    ["Phone", "telephone"],
+    ["Website", "business_page"],
+    ["Street", "street"],
+    ["Locality", "locality"],
+    ["Region", "region"],
+    ["Rating", "rating"],
+    ["Reviews", "review_count"],
+    ["place_id", "place_id"]
+  ];
+
+  function show(row, out, used) {
+    A.el("biz-name").textContent = row.business_name || "(no name returned)";
+    A.el("biz-status").textContent = out.created
+      ? "added" : "already in your list";
+    A.el("biz-status").className = "pill " + (out.created ? "succeeded" : "");
+
+    var facts = FIELDS.filter(function (f) {
+      var v = row[f[1]];
+      return v !== undefined && v !== null && String(v).trim() !== "";
+    }).map(function (f) {
+      return '<dt>' + A.esc(f[0]) + '</dt><dd>' + A.esc(row[f[1]])
+        + '</dd>';
+    }).join("");
+
+    // Reading back which search area was actually used, because a typed place
+    // is resolved rather than taken literally and the nearest area is sometimes
+    // a much broader one than the person typed.
+    if (used) {
+      facts += '<dt>Searched in</dt><dd>' + A.esc(used) + '</dd>';
+    }
+    if (row.maps_url) {
+      facts += '<dt>Map</dt><dd><a href="' + A.esc(row.maps_url)
+        + '" target="_blank" rel="noopener">open</a></dd>';
+    }
+    A.el("biz-facts").innerHTML = facts;
+    A.el("result").hidden = false;
+  }
+
+  A.el("add").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var btn = A.el("lookup");
+    btn.disabled = true;
+    A.showError(A.el("error"), "");
+    A.el("result").hidden = true;
+    try {
+      var value = A.el("value").value.trim();
+      if (!value) throw new Error("Enter something to look up.");
+
+      var body = {};
+      body[mode()] = value;
+
+      // The place is resolved to a search area BEFORE the lookup runs.
+      // DataForSEO takes a place name literally, so a place its list does not
+      // carry ("Surulere") would be sent as typed and match nothing at all.
+      // /location returns the nearest real area instead, and the page says
+      // which one it used.
+      var place = A.el("location").value.trim();
+      var used = "";
+      if (place) {
+        var loc = await A.api("/location", { body: { place: place } });
+        var hit = (loc.matches || [])[0];
+        if (!hit) {
+          throw new Error('No search area matches "' + place + '". Try a '
+            + 'wider place, such as a state or a country.');
+        }
+        body.location_code = hit.location_code;
+        used = hit.location_name + (loc.exact ? "" : " (nearest match)");
+      }
+
+      var out = await A.api("/prospects/direct", { body: body });
+      show(out.prospect || {}, out, used);
+    } catch (err) {
+      A.showError(A.el("error"), err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+{% endblock %}

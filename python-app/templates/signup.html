@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Create account · Lodestone{% endblock %}
+{% block appbar %}{% endblock %}
+{% block body %}
+<div class="center">
+  <div class="brandmark">Lodestone</div>
+  <h1>Create account</h1>
+  <p class="muted t-b-medium" style="margin-top:4px">
+    Your seller profile is created from this email the first time you use the
+    dashboard. Nothing else to fill in.
+  </p>
+  <div class="card">
+    <form id="form">
+      <div class="tf" style="margin-bottom:16px">
+        <input id="email" type="email" autocomplete="email" placeholder=" " required>
+        <label for="email">Email</label>
+      </div>
+      <div class="tf" style="margin-bottom:20px">
+        <input id="password" type="password" autocomplete="new-password"
+               placeholder=" " minlength="6" required>
+        <label for="password">Password</label>
+      </div>
+      <div class="support" style="margin:-10px 0 18px">At least 6 characters.</div>
+      <button id="submit" type="submit" style="width:100%">Create account</button>
+    </form>
+    <div id="error" class="error" hidden></div>
+    <div id="done" class="note" hidden></div>
+  </div>
+  <p class="muted t-b-medium">Already have one? <a href="/login">Sign in</a>.</p>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+  var A = window.LEADGEN_APP;
+
+  A.el("form").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var btn = A.el("submit");
+    btn.disabled = true;
+    A.showError(A.el("error"), "");
+    A.el("done").hidden = true;
+
+    var addr = A.el("email").value.trim();
+    var pw = A.el("password").value;
+    try {
+      var out = await A.signup(addr, pw);
+      // Two valid outcomes, and they are NOT the same:
+      //  - a session came back -> "Confirm email" is off, so go straight in.
+      //  - no session -> Supabase wants the address confirmed first. Saying
+      //    "check your inbox" here is the honest answer, and it is also the
+      //    single most likely reason a demo login fails, so it says so plainly
+      //    instead of claiming success.
+      if (out && out.access_token) {
+        // Confirm-email is off, so we already have a usable session. Going
+        // through login() rather than storing the raw token keeps session
+        // handling in one place.
+        await A.login(addr, pw);
+        window.location.href = "/";
+        return;
+      }
+      A.el("done").hidden = false;
+      A.el("done").textContent =
+        (out && out.user && (!out.user.identities ||
+                             out.user.identities.length === 0))
+          ? "That email is already registered. Try signing in instead."
+          : "Account created. Supabase still requires email confirmation, so "
+            + "sign in will fail until that link is clicked, or until "
+            + "'Confirm email' is turned off in Authentication > Providers "
+            + "> Email.";
+    } catch (err) {
+      A.showError(A.el("error"), err.message);
+    }
+    btn.disabled = false;
+  });
+</script>
+{% endblock %}

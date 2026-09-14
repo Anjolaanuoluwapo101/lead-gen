@@ -32,11 +32,14 @@ Usage
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
+import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
@@ -510,8 +513,60 @@ def merge_intelligence(page_analyses, site_socials=None):
 # --------------------------------------------------------------------------- #
 # Orchestration — crawl once, extract both emails and intelligence
 # --------------------------------------------------------------------------- #
+# Pages of ONE site fetch in parallel (default 4 workers): the old loop walked
+# them one at a time, so 12 pages at ~1s fetch + ~2.5s polite sleep was 30-50s
+# per site. Fetches overlap now; politeness is kept by a shared floor between
+# any two requests (below), jittered but never removed.
+#
+# Two things stay serial on purpose. The headless renderer owns ONE browser
+# page per process (headless_fetch keeps a single shared page), so renders
+# take a lock. And analysis ORDER is by discovery sequence, not by which
+# thread finished first, so "homepage + a few key pages" still means that.
+def _crawl_workers():
+    try:
+        return max(1, int(os.environ.get("EMAIL_CRAWL_WORKERS") or 4))
+    except (TypeError, ValueError):
+        return 4
+
+
+def _crawl_min_gap():
+    # One second between starts: 12 pages land in about 13s instead of
+    # about 42s, at roughly 1 request per second to the host (inside what a
+    # normal browser does with 6 concurrent connections), every fetch still
+    # jittered.
+    try:
+        return max(0.0, float(os.environ.get("EMAIL_CRAWL_MIN_GAP") or 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+_RENDER_LOCK = threading.Lock()
+
+
+class _PoliteGate:
+    """One shared floor between requests to the site being crawled.
+
+    Parallel workers overlap FETCH time (the dominant cost) but never start
+    closer than min_gap seconds apart. Replaces the old sleep-between-pages:
+    same politeness, without serialising the network wait.
+    """
+
+    def __init__(self, min_gap):
+        self._gap = min_gap
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def wait(self):
+        with self._lock:
+            pause = self._gap - (time.monotonic() - self._last)
+            if pause > 0:
+                time.sleep(pause + random.uniform(0, 0.5))
+            self._last = time.monotonic()
+
+
 def scrape_website(start_url, max_count=50, max_depth=2, same_domain_only=True,
-                    fetcher=None, analyze_pages_limit=5):
+                   fetcher=None, analyze_pages_limit=5, crawl_workers=None,
+                   stop_event=None):
     """
     Crawl a site once, extracting BOTH email addresses and content-intelligence
     signals from every page fetched (analysis capped at analyze_pages_limit
@@ -525,61 +580,87 @@ def scrape_website(start_url, max_count=50, max_depth=2, same_domain_only=True,
           "pages_scraped": int,
           "errors": [...]
         }
+
+    crawl_workers: pages fetched concurrently (default EMAIL_CRAWL_WORKERS,
+        4). 1 restores the old serial walk. A caller-supplied `fetcher` is
+        shared by all workers and must be thread-safe (test fakes are); when
+        none is given each worker builds its own Fetcher, so Sessions are
+        never shared across threads.
+
+    stop_event: optional threading.Event. When set, the crawl stops taking
+        new pages and returns what it merged so far. The caller that timed
+        out waiting uses this to wind the abandoned crawl down instead of
+        leaving it fetching and sleeping in the background with no handle.
     """
-    fetcher = fetcher or Fetcher()
+    workers = crawl_workers or _crawl_workers()
     start_domain = urlsplit(start_url).netloc.replace("www.", "")
+    gate = _PoliteGate(_crawl_min_gap())
+    state_lock = threading.Lock()
+    worker_local = threading.local()
+
+    def _worker_fetcher():
+        if fetcher is not None:
+            return fetcher
+        own = getattr(worker_local, "fetcher", None)
+        if own is None:
+            own = Fetcher(verbose=False)
+            worker_local.fetcher = own
+        return own
 
     urls_to_process = deque([(start_url, 0)])
     scraped_urls = set()
     email_sources = {}
     site_socials = {}          # social links across EVERY fetched page
-    page_analyses = []
+    page_analyses = []         # (discovery seq, analysis): sorted before merge
     errors = []
     count = 0
+    seq = 0
 
-    while urls_to_process and count < max_count:
-        url, depth = urls_to_process.popleft()
-        norm = normalize_url(url)
-        if norm in scraped_urls:
-            continue
-        scraped_urls.add(norm)
-        count += 1
+    def _fetch_one(job):
+        url, depth, job_seq = job
+        try:
+            _fetch_page(url, depth, job_seq)
+        except Exception as e:
+            # A poison page (unparseable markup, a backend blowing up past
+            # Fetcher.get's own never-raises contract) costs one page, never
+            # the crawl: the merged results so far still return below.
+            with state_lock:
+                errors.append(f"{url}: fetch failed: {e}")
 
+    def _fetch_page(url, depth, job_seq):
         base_url = get_base_url(url)
         page_path = get_page_path(url)
         referer = start_url if url != start_url else None
 
-        text, status = fetcher.get(url, referer=referer)
+        gate.wait()
+        text, status = _worker_fetcher().get(url, referer=referer)
         if not text:
-            errors.append(f"{url}: no content (status={status})")
-            if count < max_count and urls_to_process:
-                fetcher.polite_sleep()
-            continue
+            with state_lock:
+                errors.append(f"{url}: no content (status={status})")
+            return
 
         # Headless fallback: if this raw response is an empty JS shell, load the
         # page for real so email/social/analysis run on the rendered content.
         # Only fires when enabled (ENRICH_JS_RENDER) and the page looks hollow.
+        # Serialised: the renderer owns one shared page per process.
         if headless_fetch.looks_js_hollow(text) and headless_fetch.enabled():
-            rendered = headless_fetch.render(url)
+            with _RENDER_LOCK:
+                rendered = headless_fetch.render(url)
             if rendered:
                 text = rendered
 
-        for email in extract_emails(text):
-            email_sources.setdefault(email, set()).add(url)
-
+        found_emails = extract_emails(text)
         # Socials are as cheap as emails, so extract them on EVERY fetched page
         # (not throttled to analyze_pages_limit) and union site-wide. Raising
         # max_count therefore widens social coverage, matching emails.
-        for label, href in extract_social_links(
-                BeautifulSoup(text, 'lxml')).items():
-            site_socials.setdefault(label, href)
-
-        if len(page_analyses) < analyze_pages_limit:
+        found_socials = extract_social_links(BeautifulSoup(text, 'lxml'))
+        analysis = None
+        if job_seq < analyze_pages_limit:
             try:
-                page_analyses.append(analyze_page(text, url))
+                analysis = analyze_page(text, url)
             except Exception as e:
-                errors.append(f"{url}: analysis error: {e}")
-
+                analysis = e
+        discovered = []
         if max_depth < 0 or depth < max_depth:
             soup = BeautifulSoup(text, 'lxml')
             for anchor in soup.find_all('a'):
@@ -593,15 +674,51 @@ def scrape_website(start_url, max_count=50, max_depth=2, same_domain_only=True,
                     link_domain = urlsplit(full_link).netloc.replace("www.", "")
                     if link_domain != start_domain:
                         continue
+                discovered.append((full_link, depth + 1))
+
+        with state_lock:
+            for email in found_emails:
+                email_sources.setdefault(email, set()).add(url)
+            for label, href in found_socials.items():
+                site_socials.setdefault(label, href)
+            if isinstance(analysis, Exception):
+                errors.append(f"{url}: analysis error: {analysis}")
+            elif analysis is not None:
+                page_analyses.append((job_seq, analysis))
+            for full_link, next_depth in discovered:
                 if normalize_url(full_link) not in scraped_urls:
-                    urls_to_process.append((full_link, depth + 1))
+                    urls_to_process.append((full_link, next_depth))
 
-        if count < max_count and urls_to_process:
-            fetcher.polite_sleep()
+    # Batch-synchronous BFS: each batch takes the next FIFO slice (bounded by
+    # workers AND by max_count), fetches it concurrently, waits for the whole
+    # batch, then queues the discovered links. Crawl order stays breadth-first;
+    # only the network waits overlap.
+    def _stopped():
+        return stop_event is not None and stop_event.is_set()
 
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="crawl") as ex:
+        while urls_to_process and count < max_count and not _stopped():
+            batch = []
+            while urls_to_process and len(batch) < workers \
+                    and count < max_count:
+                url, depth = urls_to_process.popleft()
+                norm = normalize_url(url)
+                if norm in scraped_urls:
+                    continue
+                scraped_urls.add(norm)
+                count += 1
+                batch.append((url, depth, seq))
+                seq += 1
+            if not batch:
+                break
+            for future in [ex.submit(_fetch_one, job) for job in batch]:
+                future.result()
+
+    ordered = [analysis for _, analysis in sorted(page_analyses)]
     return {
         "emails": {email: sorted(sources) for email, sources in email_sources.items()},
-        "intelligence": merge_intelligence(page_analyses, site_socials),
+        "intelligence": merge_intelligence(ordered, site_socials),
         "pages_scraped": count,
         "errors": errors,
     }

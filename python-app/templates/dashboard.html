@@ -1,0 +1,447 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Lodestone{% endblock %}
+{% block heading %}Dashboard{% endblock %}
+{% block body %}
+
+<p class="t-b-medium muted" style="margin-bottom:20px">
+  Describe who you want to reach. The agent finds them, works out what's
+  missing, and writes the first email for each one. You read and approve.
+</p>
+
+{# `hero` carries the seed gradient: this card starts every run, so it is the
+   single loudest thing on the page. See the HERO block in style.css. #}
+<div class="card hero">
+  <form id="start">
+    <div class="tf" style="margin-bottom:12px">
+      <input id="goal" placeholder=" " required
+             value="Find 5 bakeries with no website">
+      <label for="goal">What are you looking for?</label>
+    </div>
+
+    {# The goal is free prose handed to the model, so the only way a person can
+       know what to write is if the page shows them. Two parts, in the order
+       the model reads them, each with a real example. There is deliberately
+       no Where here: the search area comes from the picker below, and a place
+       typed into the goal would fight the picked one. #}
+    <div class="anatomy">
+      <div class="part">
+        <span class="k">1. What</span>
+        <span class="v">the trade or type of business, such as
+          <em>bakeries, plumbers, barbers</em></span>
+      </div>
+      <div class="part">
+        <span class="k">2. Who to write to</span>
+        <span class="v">what makes a business worth your time, such as
+          <em>no website</em> or <em>fewer than 20 reviews</em></span>
+      </div>
+    </div>
+
+    <div class="support" style="margin-bottom:8px">
+      Click one to drop it into the box, then change the words you want.
+    </div>
+    <div class="chips">
+      <button type="button" class="chip"
+        data-goal="Find 5 bakeries with no website">
+        Find 5 bakeries with no website</button>
+      <button type="button" class="chip"
+        data-goal="Find plumbers with no website">
+        Find plumbers with no website</button>
+      <button type="button" class="chip"
+        data-goal="Find dentists with fewer than 20 reviews">
+        Find dentists with fewer than 20 reviews</button>
+    </div>
+
+    {# The search area picker. A combobox, not a text field: typing filters the
+       search directory and only a row picked from the list carries a location
+       code. Typed text alone is never sent, so a malformed place cannot reach
+       the engine as free prose and silently match nothing. The run refuses to
+       start without a pick. #}
+    <div style="margin-bottom:12px">
+      <label for="place">Where
+        <button type="button" class="q left" data-tip="Only a picked area can start a run. Typed text alone is never sent.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+        </button>
+      </label>
+      <div class="combo-wrap">
+        <input id="place" placeholder="Type a city, state or country"
+               autocomplete="off" required>
+        <input id="location_code" type="hidden">
+        <div id="place-list" class="combo-list" hidden></div>
+      </div>
+      <div class="support">Type a city, state or country, then pick the matching
+        area from the list.</div>
+    </div>
+
+    <div class="row" style="margin-bottom:12px">
+      <div>
+        <label for="scrutiny">Shortlist strictness
+          <button type="button" class="q left" data-tip="Strict wants strong proof. Balanced accepts thin data. Lenient qualifies on fit and reach alone.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </label>
+        {# No preselected tier: strictness has no safe default, so the form
+           refuses to choose one for you. The API 400s a missing tier too. #}
+        <select id="scrutiny">
+          <option value="" selected>Choose strictness</option>
+          <option value="strict">Strict</option>
+          <option value="balanced">Balanced</option>
+          <option value="lenient">Lenient</option>
+        </select>
+      </div>
+      <div style="max-width:150px">
+        <label for="target">How many
+          <button type="button" class="q left" data-tip="Qualified leads to aim for. The run stops early when it has them.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </label>
+        {# No prefilled count: the old 10 was prose nobody chose while the
+           goal said "Find 5". The API 400s a missing count too. #}
+        <input id="target" type="number" min="1" max="100"
+               placeholder="e.g. 10">
+      </div>
+      <div class="grow">
+        <label for="niche">What you sell
+          <button type="button" class="q left" data-tip="In your own words. Beats whatever the goal implies you sell. Required unless your profile already names one: without it the run scores against a placeholder niche.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </label>
+        <input id="niche" placeholder="Required unless your profile names one"
+               autocomplete="off">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="grow">
+        <label for="campaign">Campaign
+          <button type="button" class="q left" data-tip="Optional. A campaign groups leads and drafts so you can tell one batch from another. Pick one to add these leads to it, or leave it blank and the agent names a new one for you.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </label>
+        {# A select rather than a text box: a campaign is chosen from the ones
+           that exist, and typing a name is how you end up with five campaigns
+           that differ by a typo. The list is filled in by loadCampaigns(). #}
+        <select id="campaign">
+          <option value="">Let the agent decide</option>
+        </select>
+      </div>
+      <button id="go" type="submit">Start run</button>
+    </div>
+  </form>
+
+  <div id="error" class="error" hidden></div>
+
+  <p class="t-b-small muted" style="margin:16px 0 0">
+    Every run is bounded before it starts. Searches, model calls, turns, wall
+    clock and estimated spend are counted in code, and the run refuses to begin
+    work that would cross one. It always ends with a recorded reason.
+  </p>
+</div>
+
+<div class="sect" id="runs">
+  <span class="t-t-medium">Runs</span>
+  <span class="rule"></span>
+</div>
+
+<div class="card flush">
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th>
+        <th>Status</th>
+        <th>Why it stopped
+          <button type="button" class="q" data-tip="Every run ends for exactly one recorded reason. This is that reason in words, so a short result is never a mystery.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </th>
+        <th>Qualified
+          <button type="button" class="q" data-tip="Leads that scored at or above the threshold you set for your niche. These are the ones worth emailing.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </th>
+        <th>Drafts</th>
+        <th>Started</th>
+      </tr>
+    </thead>
+    <tbody id="runs-body"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="sect" id="drafts">
+  <span class="t-t-medium">Drafts awaiting review</span>
+  <span class="rule"></span>
+</div>
+
+<div class="card flush">
+  <table>
+    <thead>
+      <tr>
+        <th>To</th><th>Subject</th><th>Status</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="drafts-body"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<p class="t-b-small muted">
+  Nothing is sent from here. Open a run to read a draft, edit it, and approve
+  it. Sending is a separate, confirmed step, and it can't be undone.
+</p>
+
+{% endblock %}
+{% block script %}
+<script>
+  var A = window.LEADGEN_APP;
+  if (A.requireLogin()) { /* redirected */ }
+
+  // The stop reason is the product's main claim, so it is shown as prose rather
+  // than a status word. "stopped" alone tells the user nothing about whether
+  // the agent ran out of budget, gave up, or was cancelled.
+  // Keys MUST match agent/budget.py's TerminalReason — see the same note in
+  // run.html. This map is a deliberate second copy (two separate pages), and
+  // tests/test_stop_reason_vocabulary.py asserts BOTH stay in sync, because
+  // they had already drifted from the backend and from each other.
+  var WHY = {
+    target_met:       "Found the number of qualified leads you asked for",
+    budget_exhausted: "Hit a budget cap",
+    max_attempts:     "Used every allowed turn",
+    timeout:          "Ran out of wall-clock time",
+    no_results:       "No new results, stopped early",
+    user_cancelled:   "Cancelled by you",
+    error:            "Errored"
+  };
+
+  async function loadRuns() {
+    // The BODY is targeted by id, and the id is `runs-body` rather than `runs`:
+    // the section heading above carries `id="runs"` because that is what the
+    // nav's `/#runs` link scrolls to. Two elements sharing one id makes
+    // getElementById return the first in document order — the heading — so the
+    // rows were written into a plain <div> outside any table and the tbody sat
+    // on "Loading…" forever. The API was returning 200 the whole time.
+    var out = await A.api("/runs/list", { body: {} });
+    var rows = out.runs || [];
+    if (!rows.length) {
+      A.el("runs-body").innerHTML = '<tr><td colspan="6" class="muted">'
+        + 'No runs yet. Describe what you want above and start one.</td></tr>';
+      return;
+    }
+    A.el("runs-body").innerHTML = rows.map(function (r) {
+      var p = r.progress || {};
+      var q = p.qualified == null ? "n/a" : p.qualified;
+      var d = p.drafts == null ? "n/a" : p.drafts;
+      return '<tr>'
+        + '<td><a href="/runs/' + A.esc(r.id) + '">' + A.esc(r.id.slice(0, 8))
+        + '</a></td>'
+        + '<td><span class="pill ' + A.esc(r.status) + '">'
+        + A.esc(r.status) + '</span></td>'
+        + '<td class="muted">'
+        + A.esc(WHY[r.terminal_reason] || (r.status === "running"
+            ? "in progress" : "not reported")) + '</td>'
+        + '<td>' + A.esc(q) + '</td>'
+        + '<td>' + A.esc(d) + '</td>'
+        + '<td class="muted small">' + A.esc(A.when(r.created_at)) + '</td>'
+        + '</tr>';
+    }).join("");
+  }
+
+  async function loadDrafts() {
+    var out = await A.api("/drafts/list", { body: { limit: 25 } });
+    var rows = out.drafts || [];
+    if (!rows.length) {
+      A.el("drafts-body").innerHTML = '<tr><td colspan="4" class="muted">'
+        + 'Nothing drafted yet.</td></tr>';
+      return;
+    }
+    A.el("drafts-body").innerHTML = rows.map(function (d) {
+      return '<tr>'
+        + '<td>' + A.esc(d.to_email || "no address") + '</td>'
+        + '<td>' + A.esc(d.subject || "(no subject)") + '</td>'
+        + '<td><span class="pill ' + A.esc(d.status) + '">'
+        + A.esc(d.status) + '</span></td>'
+        // The run page is keyed by RUN id. This link used campaign_id, which
+        // is a different uuid entirely, so every "review" link 404'd and the
+        // draft editor was unreachable from the dashboard. A draft can also
+        // have no run at all (composed by hand, or written before the column
+        // existed) — then there is no run page to link to, and a dead link is
+        // worse than no link.
+        + '<td>' + (d.run_id
+            ? '<a href="/runs/' + A.esc(d.run_id) + '">review</a>'
+            : '<span class="muted small">no run</span>') + '</td>'
+        + '</tr>';
+    }).join("");
+  }
+
+  // The example goals FILL the field rather than starting a run. Filling means
+  // you can edit the words before anything is charged for, which matters most
+  // for the place: swapping in your own city is the whole point of a template.
+  Array.prototype.forEach.call(document.querySelectorAll("[data-goal]"),
+    function (chip) {
+      chip.addEventListener("click", function () {
+        A.el("goal").value = chip.getAttribute("data-goal");
+        A.el("goal").focus();
+      });
+    });
+
+  // The campaign menu is filled ONCE, not on the poll. It is a list of things
+  // that already exist, and the only event that changes it is a run the user
+  // just started, which they will see in the Runs table anyway.
+  //
+  // A failure here is swallowed deliberately. The dropdown is a convenience and
+  // a run works exactly as well with no campaign at all, so putting this inside
+  // refresh() would turn an uninstalled SQL function into a red box that came
+  // back every five seconds. A short menu is the better failure.
+  async function loadCampaigns() {
+    try {
+      var out = await A.api("/campaigns/summary", { body: {} });
+      var sel = A.el("campaign");
+      (out.campaigns || []).forEach(function (c) {
+        var o = document.createElement("option");
+        o.value = c.campaign_id;
+        o.textContent = (c.name || "untitled") + " · " + c.total_leads
+          + (c.total_leads === 1 ? " lead" : " leads");
+        sel.appendChild(o);
+      });
+    } catch (e) { /* see above */ }
+  }
+
+  async function refresh() {
+    try { await loadRuns(); await loadDrafts(); }
+    catch (e) { A.showError(A.el("error"), e.message); }
+  }
+
+  // The search area picker. Typed text is never sent: only a row picked from
+  // the list carries a location code, and the run refuses to start without
+  // one. Clearing the pick on every keystroke is what makes selection
+  // mandatory: text typed after a pick is a new query, not a confirmed area.
+  var pickedCode = 0;
+  var pickedName = "";
+  var searchTimer = 0;
+
+  function clearPick() {
+    pickedCode = 0;
+    pickedName = "";
+    A.el("location_code").value = "";
+  }
+
+  function hidePlaces() {
+    A.el("place-list").hidden = true;
+  }
+
+  function renderPlaces(rows) {
+    var box = A.el("place-list");
+    if (!rows.length) {
+      box.innerHTML = '<div class="combo-empty">No matching areas. Try a '
+        + 'wider place, such as a state or a country.</div>';
+      box.hidden = false;
+      return;
+    }
+    box.innerHTML = rows.map(function (m, i) {
+      return '<button type="button" class="combo-item" data-i="' + i + '">'
+        + '<span class="combo-name">' + A.esc(m.location_name) + '</span>'
+        + '<span class="combo-meta">' + A.esc(m.location_type || "")
+        + " \u00B7 " + A.esc(m.country_iso_code || "") + '</span>'
+        + '</button>';
+    }).join("");
+    box.hidden = false;
+    Array.prototype.forEach.call(box.querySelectorAll(".combo-item"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var m = rows[Number(btn.getAttribute("data-i"))];
+          if (!m) return;
+          A.el("place").value = m.location_name;
+          A.el("location_code").value = String(m.location_code);
+          pickedCode = m.location_code;
+          pickedName = m.location_name;
+          hidePlaces();
+        });
+      });
+  }
+
+  A.el("place").addEventListener("input", function () {
+    clearPick();
+    var q = A.el("place").value.trim();
+    if (searchTimer) clearTimeout(searchTimer);
+    if (q.length < 2) { hidePlaces(); return; }
+    searchTimer = setTimeout(function () {
+      A.api("/location/search", { body: { q: q, limit: 10 } }).then(
+        function (out) { renderPlaces(out.matches || []); },
+        function () { hidePlaces(); });
+    }, 250);
+  });
+
+  // A click outside the list closes it. Closing is not clearing: the pick
+  // stays, because the code was already confirmed by the click that made it.
+  document.addEventListener("click", function (e) {
+    var box = A.el("place-list");
+    if (box.hidden) return;
+    var wrap = A.el("place").parentElement;
+    if (wrap && !wrap.contains(e.target)) hidePlaces();
+  });
+
+  // The seller's own niche, when their profile names one. Prefilled so the
+  // run is scored against it without retyping; remembered in profileNiche
+  // so the submitter knows a blank field is still covered. A failure here
+  // must not break the page: the field simply stays blank (and a blank
+  // field with no profile niche blocks the submit below, safely).
+  var profileNiche = "";
+  async function loadNiche() {
+    try {
+      var out = await A.api("/seller/me");
+      var n = out.seller && out.seller.niche;
+      if (n) {
+        profileNiche = String(n).trim();
+        if (!A.el("niche").value) A.el("niche").value = n;
+      }
+    } catch (e) { /* see above */ }
+  }
+
+  A.el("start").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var btn = A.el("go");
+    btn.disabled = true;
+    A.showError(A.el("error"), "");
+    try {
+      if (!pickedCode) {
+        throw new Error("Pick a search area from the list before starting "
+          + "the run.");
+      }
+      // Strictness, count and niche are all required: each had a silent
+      // default (Strict, 10, the dev placeholder) and each default caused a
+      // real mis-scored run. The API enforces the same, so these checks are
+      // the fast local echo of a rule that holds end to end.
+      var scrutiny = A.el("scrutiny").value;
+      if (!scrutiny) {
+        throw new Error("Choose a shortlist strictness: Strict, Balanced "
+          + "or Lenient.");
+      }
+      var target = parseInt(A.el("target").value, 10);
+      if (!(target >= 1 && target <= 100)) {
+        throw new Error("Say how many qualified leads to find (1-100).");
+      }
+      var niche = A.el("niche").value.trim();
+      if (!niche && !profileNiche) {
+        throw new Error("Say what you sell, or set it once on your "
+          + "profile: without it the run scores against a placeholder.");
+      }
+      var body = { goal: A.el("goal").value.trim(),
+                   location_code: pickedCode, location_name: pickedName,
+                   scrutiny: scrutiny, target_qualified: target };
+      if (niche) body.niche = niche;
+      var cid = A.el("campaign").value.trim();
+      if (cid) body.campaign_id = cid;
+      var out = await A.api("/runs", { body: body });
+      window.location.href = "/runs/" + encodeURIComponent(out.run_id);
+    } catch (err) {
+      A.showError(A.el("error"), err.message);
+      btn.disabled = false;
+    }
+  });
+
+  loadNiche();
+
+  loadCampaigns();
+  refresh();
+  // The list has to update on its own: a run is the thing you just started, and
+  // making the user reload to see it move would undercut the whole point.
+  setInterval(refresh, A.cfg.pollMs);
+</script>
+{% endblock %}

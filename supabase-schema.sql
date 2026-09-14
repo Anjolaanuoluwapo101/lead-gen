@@ -49,7 +49,7 @@ create table if not exists public.leads (
   intelligence jsonb default '{}',          -- merged /email intelligence
   score        int not null default 0,      -- retained = opportunity (back-compat)
   qualified    boolean not null default false,
-  weakness     text,                        -- why this lead fits the niche
+  weakness     text,                        -- what the business LACKS (a gap, never a compliment)
   first_line   text,                        -- optional outreach opener
   -- Phase 1: split score into opportunity + confidence, plus the evidence.
   digital_presence  text,                   -- OFF_GRID|SOCIAL_ONLY|WEBSITE_ONLY|WEBSITE_AND_SOCIAL|STRONG_DIGITAL_PRESENCE
@@ -171,9 +171,17 @@ create table if not exists public.seller_profile (
   title        text,                          -- e.g. 'Founder', 'Sales Director'
   brand        text,                          -- business/sender brand the emails go out as
   phone        text,
-  -- Resume (uploaded by the seller). We store the EXTRACTED text, not the file.
+  -- Resume (uploaded by the seller). `resume_text` is the EXTRACTED text and is
+  -- what the drafting model reads. The FILE's bytes are kept separately in
+  -- file_store (Supabase Storage by default) because the text cannot be
+  -- attached to an email -- a summary of a resume is not the resume.
+  -- `resume_key` is the object key; NULL means no file is stored, which is an
+  -- ordinary state (FILE_BACKEND=none, or an upload from before this existed).
   resume_text     text,
   resume_filename text,
+  resume_key          text,
+  resume_content_type text,
+  resume_size_bytes   integer,
   -- Portfolio website. We store the scraped/extracted output.
   portfolio_url   text,
   portfolio_text  text,
@@ -269,3 +277,21 @@ grant execute on function public.campaign_summary(uuid, uuid) to anon, authentic
 -- update public.campaigns
 --    set seller_id = '<DEFAULT_SELLER_ID>'
 --  where seller_id is null;
+
+-- ---------------------------------------------------------------------
+-- location_memo — shared cache of place-string -> location resolution
+-- (Phase 2.4). dataforseo.lookup_location memoizes every unseen place so a
+-- repeat is instant; the file cache (data/location_memo.json) is per-machine
+-- and per-container, so ECS tasks diverge and every fresh deploy re-learns
+-- the same cities. This table is the shared copy: loads are capped to the
+-- most recent rows, saves upsert only newly learned keys, and everything is
+-- best-effort — a missing table or a blip falls back to the file, never an
+-- error. Apply in the SQL editor; the code activates it on its own.
+-- ---------------------------------------------------------------------
+create table if not exists public.location_memo (
+  place_key  text primary key,
+  result     jsonb not null,
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_location_memo_recent
+  on public.location_memo(updated_at desc);

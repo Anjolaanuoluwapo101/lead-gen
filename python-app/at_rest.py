@@ -43,6 +43,11 @@ def _load_dotenv(path):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _load_dotenv(os.path.join(HERE, ".env"))
+# Fallback for the deployed runtime: .env lives OUTSIDE this directory
+# because AgentCore's CodeZip packager copies codeLocation wholesale and
+# does NOT exclude .env (only .git/.venv/__pycache__/node_modules are
+# skipped). Secrets must never be inside the packaged directory.
+_load_dotenv(os.path.join(HERE, os.pardir, ".env"))
 
 
 class KeyNotConfigured(RuntimeError):

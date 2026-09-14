@@ -127,8 +127,15 @@ def _resolve_chromium():
 # fresh profile; a one-time --headed run can accept it and we reuse that choice
 # on later headless runs. A throwaway temp profile would re-trigger the wall
 # every run, so this must be stable across invocations.
-PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           ".browser-profile")
+#
+# It lives in the PARENT directory on purpose. AgentCore's CodeZip packager
+# copies everything under codeLocation (this folder) into the deploy assets
+# bucket and does NOT read .gitignore, and a Chrome profile is cookies and
+# session state — not something to upload. Same reason .env was moved up.
+# The profile itself is unchanged; only its path moved.
+PROFILE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    ".browser-profile")
 
 
 def make_driver(headless=True):

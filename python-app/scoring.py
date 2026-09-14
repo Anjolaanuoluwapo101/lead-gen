@@ -146,9 +146,30 @@ def _gather_signals(row, intelligence, emails):
     rating = _to_float(row.get("rating"))
     review_count = _to_int(row.get("review_count"))
 
-    # Claimed listings (True/False) vs unknown ("").
+    # THREE states, not two. `claimed is True` collapsed "Google says this
+    # listing is unverified" and "Google told us nothing at all" into the same
+    # False -- and `sig` is mirrored into the breakdown (see `compute`), which
+    # the scorer receives as DETERMINISTIC EVIDENCE. So a listing with no
+    # is_claimed at all was handed to the model as if it had been confirmed
+    # unclaimed, and "your Google listing is unclaimed" is exactly the kind of
+    # gap the model is asked to write. A business would have been accused of
+    # neglecting a listing on the strength of Google's silence.
+    #
+    #    True  -- Google reports the owner verified the listing
+    #    False -- Google reports it is NOT verified. A real gap.
+    #    None  -- unknown: absent key, "", or any other value. NOT a gap.
+    #
+    # Scoring is deliberately unchanged: only a confirmed True earns the 40
+    # points below, so an unknown listing scores conservatively exactly as it
+    # did before. What changes is that the breakdown now says `null` rather
+    # than `false`, so the model can tell the two apart.
     claimed = row.get("is_claimed")
-    is_claimed = claimed is True
+    if claimed is True:
+        is_claimed = True
+    elif claimed is False:
+        is_claimed = False
+    else:
+        is_claimed = None
 
     activity_hits = 0
     for payload in socials.values():

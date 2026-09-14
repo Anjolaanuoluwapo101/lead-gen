@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Lodestone{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<script>
+  // Injected rather than fetched: the page needs the anon key before it can
+  // render a login form, and a round trip would only add a flash of "loading".
+  // The anon key is publishable by design (see routes_ui.py).
+  window.LEADGEN = {
+    supabaseUrl: {{ supabase_url | tojson }},
+    anonKey: {{ supabase_anon_key | tojson }},
+    pollMs: {{ poll_ms | tojson }},
+    authRequired: {{ auth_required | tojson }}
+  };
+</script>
+</head>
+<body>
+{% set path = request.path %}
+<div class="shell">
+
+  {# The navigation drawer. Every item points at something that exists — the
+     Runs and Drafts entries land on the dashboard's own sections rather than
+     inventing list pages that no route serves.
+
+     It is a block because the auth pages override it to nothing: there is no
+     workspace to navigate to before you are signed in, and links to Runs and
+     Settings would only bounce back to /login. #}
+  {% block drawer %}
+  <nav class="drawer">
+    <a class="appname" href="/">Lodestone</a>
+
+    <div class="sec">Workspace</div>
+    <a class="nav-item{% if path == '/' %} on{% endif %}" href="/">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <rect x="3" y="3" width="8" height="8" rx="1.5"/>
+        <rect x="13" y="3" width="8" height="8" rx="1.5"/>
+        <rect x="3" y="13" width="8" height="8" rx="1.5"/>
+        <rect x="13" y="13" width="8" height="8" rx="1.5"/>
+      </svg>
+      Dashboard
+    </a>
+    {# Its own page rather than a second form on the dashboard: this is a
+       different way in, and it needs room to explain that a name is a search
+       while an id is exact. #}
+    <a class="nav-item{% if path == '/prospects' %} on{% endif %}"
+       href="/prospects">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 2.2C8.2 2.2 5.1 5.3 5.1 9.1c0 5.3 6.9 12.7 6.9 12.7s6.9-7.4 6.9-12.7c0-3.8-3.1-6.9-6.9-6.9z"
+              fill="currentColor"/>
+        <circle cx="12" cy="9.1" r="2.5" fill="var(--sc-low)"/>
+      </svg>
+      Add a business
+    </a>
+    <a class="nav-item" href="/#runs">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="currentColor"/>
+        <path d="M12 6.8V12l3.6 2.1" fill="none" stroke="var(--sc-low)"
+              stroke-width="2.2" stroke-linecap="round"/>
+      </svg>
+      Runs
+    </a>
+    <a class="nav-item" href="/#drafts">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2" y="5" width="20" height="14" rx="2" fill="currentColor"/>
+        <path d="M3.4 7.2 12 13l8.6-5.8" fill="none" stroke="var(--sc-low)"
+              stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      Drafts
+    </a>
+
+    <div class="sec">Account</div>
+    <a class="nav-item{% if path == '/settings' %} on{% endif %}" href="/settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" aria-hidden="true">
+        <path d="M3 7h7M14 7h7M3 17h3M10 17h11"/>
+        <circle cx="12" cy="7" r="2.2" fill="currentColor" stroke="none"/>
+        <circle cx="8" cy="17" r="2.2" fill="currentColor" stroke="none"/>
+      </svg>
+      Settings
+    </a>
+    {# Sign out and the account line sit together at the FOOT of the drawer,
+       moved down by `.drawer-foot { margin-top: auto }`. Signing out is a rare
+       action next to a destructive one, so it is kept away from the workspace
+       links that get clicked all day.
+
+       The two are wrapped rather than pushed down individually, because a
+       single `margin-top: auto` on each would split the free space between
+       them instead of moving both to the bottom. The wrapper also survives the
+       signed-out case, where the sign out button is `hidden` and would
+       otherwise leave the account line floating mid drawer. #}
+    <div class="drawer-foot">
+      <button id="logout" class="nav-item danger" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/>
+          <path d="M10 16l-4-4 4-4M6 12h9"/>
+        </svg>
+        Sign out
+      </button>
+
+      {# app.js fills this with the signed-in email on DOMContentLoaded. #}
+      <span id="whoami" class="nav-foot"></span>
+    </div>
+  </nav>
+  {% endblock %}
+
+  <div class="content">
+    {% block appbar %}
+    <header class="appbar">
+      <span class="title">{% block heading %}{% endblock %}</span>
+      <span class="spacer"></span>
+      {% block actions %}{% endblock %}
+    </header>
+    {% endblock %}
+
+    <main class="page">
+      {% block body %}{% endblock %}
+    </main>
+  </div>
+
+</div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block script %}{% endblock %}
+</body>
+</html>

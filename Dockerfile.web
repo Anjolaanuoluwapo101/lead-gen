@@ -1,0 +1,74 @@
+# The dashboard image — Flask only, for AWS App Runner.
+#
+# This is a SECOND image, not a replacement. ./Dockerfile is the n8n image and
+# is deliberately untouched: n8n hardcodes http://127.0.0.1:5000 and keeps
+# talking to a local Flask exactly as before. What runs here is another instance
+# of the same app against the same Supabase, so the two do not compete — one
+# database, two front doors.
+#
+# WHAT IS DELIBERATELY ABSENT
+#
+# No chromium, and no playwright browsers. AGENT_BACKEND=agentcore makes
+# POST /runs dispatch to the deployed runtime rather than execute the agent in
+# this process, so the scraper stack is off the request path — and it is the
+# heaviest dependency here by an order of magnitude. The cost is that
+# `render_mode=js` on the settings page (and google_maps' selenium path) cannot
+# work in this container. Both are imported lazily, inside functions, so the
+# failure is a clear error on that one feature rather than a container that
+# will not boot.
+#
+# No .env, and no secrets in the image at all. They are read from SSM at boot
+# via LEADGEN_SECRETS_PATH — the same /leadgen/ parameters the AgentCore runtime
+# reads. See python-app/runtime_secrets.py, and the hydrate() call near the top
+# of app.py that has to run before the engine modules are imported.
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Requirements first, on their own layer: a code change then rebuilds in
+# seconds instead of reinstalling lxml and cryptography.
+#
+# Two packages beyond requirements.txt, both pinned to the versions the suite
+# was run against locally. requirements.txt itself is left alone: it is the
+# LOCAL dev list, and neither of these is needed to run the app on a laptop.
+#
+#   boto3          runtime_secrets.hydrate() at boot, and
+#                  routes_agent._run_on_agentcore. The AgentCore runtime gets it
+#                  from its base image and the venv gets it as a
+#                  bedrock-agentcore dependency — python:3.11-slim gives neither.
+#
+#   strands-agents routes_agent imports the Orchestrator at MODULE scope
+#                  (routes_agent.py:71), which imports agent.tools, which does
+#                  `from strands import tool`. So the SDK is required to boot
+#                  even under AGENT_BACKEND=agentcore, where no local
+#                  Orchestrator ever runs. It is not on the request path; it is
+#                  on the import path, and the import path is not optional.
+#
+# Both absences surfaced as a worker that would not boot, which is the loudest
+# available way to fail and the reason hydrate() sits above the engine imports.
+# requirements-web.txt, not requirements.txt: identical except playwright is
+# excluded (heavy wheel, unusable without the chromium this image omits).
+# requirements.txt stays the local-dev/n8n list and stays untouched.
+COPY python-app/requirements-web.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt \
+        gunicorn boto3==1.43.92 strands-agents==1.55.1
+
+COPY python-app/ /app/
+RUN mkdir -p /app/outputs
+
+# App Runner injects $PORT. Binding 0.0.0.0 is the whole point of this file:
+# app.py's own entrypoint binds 127.0.0.1, which inside a container is reachable
+# only from inside it. (That entrypoint is also why nothing here relies on it —
+# gunicorn imports app:app and never executes the __main__ block.)
+#
+# One worker, several threads. POST /runs answers immediately and does the work
+# on a daemon thread (routes_agent._run_in_background), so extra workers buy
+# nothing, and a worker recycled mid-run would take a live run's thread with it.
+# The timeout is generous for the same reason: dispatch to AgentCore blocks that
+# background thread for the length of the run.
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 8 --timeout 300 --graceful-timeout 30 --access-logfile - --error-logfile -"]
