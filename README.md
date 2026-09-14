@@ -140,9 +140,8 @@ clicks a link in an email that may never arrive.
 
 ```bash
 # From the REPO ROOT, not agentcore/. The CLI reads agentcore/agentcore.json from
-# the project root and refuses to run anywhere else — including from agentcore/,
-# where it prints a "run this from your project root" hint and exits 0.
-agentcore deploy                 # first run also does an npm install; slow, not hung
+# the project root and refuses to run anywhere else.
+agentcore deploy                 # deploys the runtime via CDK
 agentcore status                 # READY, and the runtime ARN
 ```
 
@@ -157,7 +156,8 @@ AGENTCORE_REGION=us-west-2
 Runs now execute in AWS instead of in your web process — same dashboard, same
 live progress, same result. Secrets are read from SSM Parameter Store at boot,
 so they never enter the image, and browser profiles used for scraping stay on
-your machine. **Redeploy after changing anything the agent imports.**
+your machine. **Redeploy both the runtime (`agentcore deploy`) and the dashboard
+(`bash deploy-dashboard.sh`) after changing anything the agent imports.**
 
 ### The dashboard itself
 
@@ -354,53 +354,8 @@ assets/               architecture diagram
 
 </details>
 
-<details>
-<summary><b>The honest bit</b></summary>
-
-A reader who probes this should find the README told them the truth.
-
-**Working today:** the agent and all twelve tools, bounded stop reasons, the
-live dashboard with review and approval, per-seller sending identity, CSV
-export, and the deployed AgentCore runtime.
-
-**Not wired:** SES sending. `SEND_BACKEND` defaults to `none`, and under it the
-send endpoint refuses with a message naming the missing setting. `smtp` is the
-path that works today — any free provider, one block of env vars.
-
-**Known gaps:**
-
-- **The AgentCore runtime is IAM-gated, but has no *authorisation* gate.**
-  It is not a public endpoint — an unsigned `POST /invocations` is refused with
-  403 `Missing Authentication Token`, and only a SigV4-signed call from a
-  principal holding `bedrock-agentcore:InvokeAgentRuntime` reaches it. What is
-  missing is the layer above: `_resolve_seller_id` takes `seller_id` from the
-  payload, so a caller who can already invoke the runtime can name any tenant.
-  That is intra-account privilege escalation, not an open door.
-
-  Closing it properly is not just a check in `invoke()`: AgentCore does not pass
-  the caller's IAM identity into the runtime — `RequestContext` carries only
-  `session_id`, `request_headers` and the raw Starlette request — so there is no
-  "who called me" for the runtime to compare a claimed `seller_id` against. The
-  route would be a shared secret in a header (that is what `request_headers` is
-  for), which the Flask caller would have to send on every invoke.
-- **The Flask API is unauthenticated by default.** `AUTH_REQUIRED` defaults to
-  `false`, and under it the API is open — that is what the flag means, and it is
-  what keeps the five n8n workflows running with no credential. Turn it on and
-  the tenant routes require a bearer or service token; set `SERVICE_TOKEN`
-  *before* flipping it, or n8n loses its platform scope.
-
-  Once on, the scoping is real: `/seller/<seller_id>/*` compares the id in the
-  URL against the credential (a bearer token is one tenant and may only touch
-  its own row; a valid service token is the platform and may touch any), and
-  `POST /seller`, `/seller/list` and `/seller/by-email` — which name their
-  subject in the body or a query parameter and so have no id to compare against
-  a credential — are operator-only. Covered by `test_seller_route_scoping.py`
-  from both sides.
-
 **Spend is always an estimate.** `lead_engine` reports no real cost data, and
 the UI never implies otherwise.
-
-</details>
 
 ---
 

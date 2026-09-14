@@ -34,6 +34,9 @@ agentcore/cdk/dist/
 agentcore/.cli/
 agentcore/.cache/
 agentcore/.env.local
+agentcore/.cache/
+agentcore/leading/
+agentcore/leadgen/
 # Bytecode and logs. These were tracked by accident and churn on every run.
 __pycache__/
 *.pyc
